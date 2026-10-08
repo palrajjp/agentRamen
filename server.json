@@ -1,0 +1,27 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.palrajjp/agentramen",
+  "title": "agentRamen",
+  "description": "Local-first codebase intelligence and task context for coding agents. Indexes source structure and Git history into a local SQLite graph, then retrieves task-relevant files and excerpts via CLI, MCP, or local HTTP. Zero runtime dependencies by default.",
+  "repository": {
+    "url": "https://github.com/palrajjp/agentRamen",
+    "source": "github"
+  },
+  "version": "0.2.3",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
+      "identifier": "agentramen",
+      "version": "0.2.3",
+      "transport": { "type": "stdio" },
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "mcp",
+          "description": "Start the agentRamen MCP stdio server"
+        }
+      ]
+    }
+  ]
+}

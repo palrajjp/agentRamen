@@ -1,4 +1,4 @@
-"""Small reproducible benchmark for initial and one-file incremental indexing."""
+"""Reproducible synthetic and temporary-copy repository indexing benchmarks."""
 
 from __future__ import annotations
 
@@ -10,7 +10,15 @@ import tempfile
 import time
 from pathlib import Path
 
-from .core import LANGUAGES, _terms, context_for, connect, index_repository
+from .core import (
+    DEFAULT_EMBEDDING_MODEL,
+    GitGraphError,
+    LANGUAGES,
+    _terms,
+    context_for,
+    connect,
+    index_repository,
+)
 
 
 def _git(root: Path, *args: str) -> str:
@@ -31,7 +39,15 @@ def _setup_git(root: Path) -> None:
     _git(root, "config", "user.name", "GitGraph Benchmark")
 
 
-def _measure(root: Path, files: int, task: str, target: Path) -> dict[str, object]:
+def _measure(
+    root: Path, files: int, task: str, target: Path, semantic: bool = False
+) -> dict[str, object]:
+    if semantic:
+        (root / ".gitgraph.yml").write_text(
+            "semantic:\n  enabled: true\n"
+            f"  model: {DEFAULT_EMBEDDING_MODEL}\n",
+            encoding="utf-8",
+        )
     started = time.perf_counter()
     initial = index_repository(root)
     initial_seconds = time.perf_counter() - started
@@ -66,6 +82,7 @@ def _measure(root: Path, files: int, task: str, target: Path) -> dict[str, objec
     return {
         "files": files,
         "task": task,
+        "semantic_enabled": semantic,
         "initial_index_seconds": round(initial_seconds, 6),
         "incremental_index_seconds": round(incremental_seconds, 6),
         "context_retrieval_seconds": round(retrieval_seconds, 6),
@@ -79,7 +96,7 @@ def _measure(root: Path, files: int, task: str, target: Path) -> dict[str, objec
     }
 
 
-def run_benchmark(file_count: int) -> dict[str, object]:
+def run_benchmark(file_count: int, semantic: bool = False) -> dict[str, object]:
     if file_count < 1:
         raise ValueError("File count must be positive.")
     with tempfile.TemporaryDirectory(prefix="gitgraph-benchmark-") as directory:
@@ -98,10 +115,10 @@ def run_benchmark(file_count: int) -> dict[str, object]:
         _git(root, "commit", "-qm", "benchmark fixture")
         identifier = 1000 + file_count - 1
         target = source / f"service_{identifier}.py"
-        return _measure(root, file_count, str(identifier), target)
+        return _measure(root, file_count, str(identifier), target, semantic)
 
 
-def run_repository_benchmark(source_root: Path) -> dict[str, object]:
+def run_repository_benchmark(source_root: Path, semantic: bool = False) -> dict[str, object]:
     source_root = source_root.resolve()
     tracked = [path for path in _git(source_root, "ls-files", "-z").split("\0") if path]
     if not tracked:
@@ -131,7 +148,53 @@ def run_repository_benchmark(source_root: Path) -> dict[str, object]:
         _setup_git(root)
         _git(root, "add", "-A")
         _git(root, "commit", "-qm", "repository benchmark fixture")
-        return _measure(root, len(eligible), task, target)
+        return _measure(root, len(eligible), task, target, semantic)
+
+
+def run_comparisons(
+    file_counts: list[int],
+    repository: Path | None,
+    semantic_modes: tuple[bool, ...],
+) -> list[dict[str, object]]:
+    results = []
+    semantic_error: str | None = None
+    for semantic in semantic_modes:
+        scenarios = [
+            (f"synthetic-{count}", lambda count=count: run_benchmark(count, semantic))
+            for count in file_counts
+        ]
+        if repository:
+            scenarios.append(
+                (
+                    f"repository-{repository}",
+                    lambda: run_repository_benchmark(repository, semantic),
+                )
+            )
+        for name, run in scenarios:
+            if semantic and semantic_error:
+                results.append(
+                    {
+                        "scenario": name,
+                        "semantic_enabled": True,
+                        "error": f"Skipped after semantic setup failed: {semantic_error}",
+                    }
+                )
+                continue
+            try:
+                results.append(run())
+            except (GitGraphError, OSError, ValueError, subprocess.CalledProcessError) as exc:
+                if len(semantic_modes) == 1:
+                    raise
+                if semantic:
+                    semantic_error = str(exc)
+                results.append(
+                    {
+                        "scenario": name,
+                        "semantic_enabled": semantic,
+                        "error": str(exc),
+                    }
+                )
+    return results
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -142,11 +205,18 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         help="Also benchmark a copy of a Git repository's tracked working-tree files",
     )
+    parser.add_argument(
+        "--semantic-mode",
+        choices=("off", "on", "both"),
+        default="off",
+        help="Benchmark semantic retrieval off, on, or in both modes",
+    )
     args = parser.parse_args(argv)
     try:
-        results = [run_benchmark(count) for count in args.files]
-        if args.repository:
-            results.append(run_repository_benchmark(args.repository))
+        modes = (False, True) if args.semantic_mode == "both" else (
+            args.semantic_mode == "on",
+        )
+        results = run_comparisons(args.files, args.repository, modes)
     except (OSError, ValueError, subprocess.CalledProcessError) as exc:
         parser.exit(1, f"gitgraph-benchmark: {exc}\n")
     print(json.dumps(results, indent=2))

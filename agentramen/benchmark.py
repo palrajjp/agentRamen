@@ -12,7 +12,7 @@ from pathlib import Path
 
 from .core import (
     DEFAULT_EMBEDDING_MODEL,
-    GitGraphError,
+    AgentRamenError,
     LANGUAGES,
     _terms,
     context_for,
@@ -36,14 +36,14 @@ def _git(root: Path, *args: str) -> str:
 def _setup_git(root: Path) -> None:
     subprocess.run(["git", "init", "-q", str(root)], check=True)
     _git(root, "config", "user.email", "benchmark@example.invalid")
-    _git(root, "config", "user.name", "GitGraph Benchmark")
+    _git(root, "config", "user.name", "agentRamen Benchmark")
 
 
 def _measure(
     root: Path, files: int, task: str, target: Path, semantic: bool = False
 ) -> dict[str, object]:
     if semantic:
-        (root / ".gitgraph.yml").write_text(
+        (root / ".agentramen.yml").write_text(
             "semantic:\n  enabled: true\n"
             f"  model: {DEFAULT_EMBEDDING_MODEL}\n",
             encoding="utf-8",
@@ -75,7 +75,7 @@ def _measure(
     )
     database_bytes = sum(
         path.stat().st_size
-        for path in (root / ".gitgraph").glob("graph.db*")
+        for path in (root / ".agentramen").glob("graph.db*")
         if path.is_file()
     )
     conn.close()
@@ -99,7 +99,7 @@ def _measure(
 def run_benchmark(file_count: int, semantic: bool = False) -> dict[str, object]:
     if file_count < 1:
         raise ValueError("File count must be positive.")
-    with tempfile.TemporaryDirectory(prefix="gitgraph-benchmark-") as directory:
+    with tempfile.TemporaryDirectory(prefix="agentramen-benchmark-") as directory:
         root = Path(directory)
         _setup_git(root)
         source = root / "src"
@@ -123,7 +123,7 @@ def run_repository_benchmark(source_root: Path, semantic: bool = False) -> dict[
     tracked = [path for path in _git(source_root, "ls-files", "-z").split("\0") if path]
     if not tracked:
         raise ValueError(f"No tracked files found in {source_root}.")
-    with tempfile.TemporaryDirectory(prefix="gitgraph-repository-benchmark-") as directory:
+    with tempfile.TemporaryDirectory(prefix="agentramen-repository-benchmark-") as directory:
         root = Path(directory) / "repository"
         root.mkdir()
         copied = []
@@ -182,7 +182,7 @@ def run_comparisons(
                 continue
             try:
                 results.append(run())
-            except (GitGraphError, OSError, ValueError, subprocess.CalledProcessError) as exc:
+            except (AgentRamenError, OSError, ValueError, subprocess.CalledProcessError) as exc:
                 if len(semantic_modes) == 1:
                     raise
                 if semantic:
@@ -198,7 +198,7 @@ def run_comparisons(
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Measure GitGraph indexing and context retrieval")
+    parser = argparse.ArgumentParser(description="Measure agentRamen indexing and context retrieval")
     parser.add_argument("--files", nargs="+", type=int, default=[10, 1000])
     parser.add_argument(
         "--repository",
@@ -218,7 +218,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         results = run_comparisons(args.files, args.repository, modes)
     except (OSError, ValueError, subprocess.CalledProcessError) as exc:
-        parser.exit(1, f"gitgraph-benchmark: {exc}\n")
+        parser.exit(1, f"agentramen-benchmark: {exc}\n")
     print(json.dumps(results, indent=2))
     return 0
 

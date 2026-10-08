@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .benchmark import run_comparisons
 from .core import (
-    GitGraphError,
+    AgentRamenError,
     architecture,
     architecture_at,
     connect,
@@ -39,8 +39,8 @@ def _output(value: object, as_json: bool = False) -> None:
 
 
 def _init(root: Path) -> dict[str, object]:
-    config = root / ".gitgraph.yml"
-    workflow = root / ".github" / "workflows" / "gitgraph.yml"
+    config = root / ".agentramen.yml"
+    workflow = root / ".github" / "workflows" / "agentramen.yml"
     if not config.exists():
         config.write_text(
             f"version: 1\nrepository:\n  name: {json.dumps(root.name)}\n"
@@ -56,7 +56,7 @@ def _init(root: Path) -> dict[str, object]:
     if not workflow.exists():
         workflow.parent.mkdir(parents=True, exist_ok=True)
         workflow.write_text(
-            "name: GitGraph\n\n"
+            "name: agentRamen\n\n"
             "on:\n"
             "  push:\n"
             "    branches: [\"**\"]\n"
@@ -65,8 +65,8 @@ def _init(root: Path) -> dict[str, object]:
             "  schedule:\n"
             "    - cron: \"17 4 * * 1\"\n\n"
             "jobs:\n"
-            "  gitgraph:\n"
-            "    uses: palrajjp/gitGraph/.github/workflows/index.yml@main\n",
+            "  agentramen:\n"
+            "    uses: palrajjp/agentRamen/.github/workflows/index.yml@main\n",
             encoding="utf-8",
         )
     stats = index_repository(root)
@@ -205,7 +205,7 @@ def _mcp(root: Path) -> None:
                 result = {
                     "protocolVersion": params.get("protocolVersion", "2024-11-05"),
                     "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "gitgraph", "version": "0.1.0"},
+                    "serverInfo": {"name": "agentramen", "version": "0.1.0"},
                 }
             elif method == "notifications/initialized":
                 continue
@@ -246,13 +246,13 @@ def _mcp(root: Path) -> None:
                 elif name == "repo_changes":
                     value = recent_changes(root, int(args.get("limit", 20)))
                 else:
-                    raise GitGraphError(f"Unknown MCP tool: {name}")
+                    raise AgentRamenError(f"Unknown MCP tool: {name}")
                 result = {
                     "content": [{"type": "text", "text": json.dumps(value, indent=2)}],
                     "structuredContent": value,
                 }
             else:
-                raise GitGraphError(f"Unknown MCP method: {method}")
+                raise AgentRamenError(f"Unknown MCP method: {method}")
             response = {"jsonrpc": "2.0", "id": message.get("id"), "result": result}
         except Exception as exc:
             response = {
@@ -264,7 +264,7 @@ def _mcp(root: Path) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="gitgraph", description="Local-first Git repository memory")
+    parser = argparse.ArgumentParser(prog="agentramen", description="Local-first Git repository memory")
     subparsers = parser.add_subparsers(dest="command", required=True)
     for command in ("init", "index", "update", "status", "mcp"):
         sub = subparsers.add_parser(command)
@@ -361,8 +361,8 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         _output(value, args.json)
         return 0
-    except (GitGraphError, OSError, ValueError) as exc:
-        print(f"gitgraph: {exc}", file=sys.stderr)
+    except (AgentRamenError, OSError, ValueError) as exc:
+        print(f"agentramen: {exc}", file=sys.stderr)
         return 1
 
 

@@ -17,6 +17,29 @@ gitgraph context "Add authentication"
 
 `gitgraph init` creates `.gitgraph.yml` and a GitHub Actions caller workflow if they do not exist, then creates/updates `.gitgraph/graph.db`. `gitgraph update` and `gitgraph index` incrementally refresh changed files. The database is ignored by Git.
 
+### Configuration
+
+GitGraph reads the following fields from `.gitgraph.yml`:
+
+```yaml
+version: 1
+indexing:
+  incremental: true
+git:
+  history: true
+  co_changes: true
+history:
+  commits: 100
+context:
+  default_budget: 2000
+ignore:
+  - .env
+  - "*.pem"
+  - private/
+```
+
+`indexing.incremental: false` reparses every eligible file on each index. `git.history: false` removes stored commit, rename, and co-change history; enabling it later rebuilds the configured recent history. `history.commits` controls retained commits (1–100,000), and `git.co_changes` toggles co-change edges. `context.default_budget` is used by the CLI, MCP, and HTTP API when no budget is passed. Configuration is a dependency-free YAML subset; unsupported/malformed values are rejected with a setting-specific error. `.gitgraphignore` patterns are added to, rather than replacing, the built-in and YAML ignore rules.
+
 ## Commands
 
 ```text

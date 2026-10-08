@@ -8,6 +8,7 @@ import posixpath
 import re
 import sqlite3
 import subprocess
+from dataclasses import dataclass
 from collections import Counter
 from pathlib import Path
 from typing import Iterable
@@ -17,6 +18,8 @@ from .analyzers import analyze, module_candidates
 DEFAULT_IGNORES = (
     ".git/",
     ".gitgraph/",
+    ".gitgraph.yml",
+    ".gitgraphignore",
     ".gitgraph-action/",
     "node_modules/",
     "dist/",
@@ -56,10 +59,115 @@ LANGUAGES = {
     ".swift": "swift", ".ts": "typescript", ".tsx": "typescript",
 }
 INDEX_VERSION = "3"
+DEFAULT_CONTEXT_BUDGET = 2000
+DEFAULT_HISTORY_COMMITS = 100
 
 
 class GitGraphError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class RepositoryConfig:
+    incremental: bool = True
+    history_enabled: bool = True
+    co_changes_enabled: bool = True
+    history_commits: int = DEFAULT_HISTORY_COMMITS
+    default_budget: int = DEFAULT_CONTEXT_BUDGET
+    ignore: tuple[str, ...] = ()
+
+
+def _config_scalar(value: str):
+    value = value.strip()
+    if value.lower() in ("true", "false"):
+        return value.lower() == "true"
+    if value.isdigit():
+        return int(value)
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+        return value[1:-1]
+    return value
+
+
+def load_config(root: Path) -> RepositoryConfig:
+    """Read the simple, dependency-free YAML subset generated/documented by GitGraph."""
+    config_path = root / ".gitgraph.yml"
+    if not config_path.is_file():
+        return RepositoryConfig()
+
+    document: dict[str, object] = {}
+    stack: list[tuple[int, dict[str, object] | list[object]]] = [(-1, document)]
+    for line_number, raw_line in enumerate(
+        config_path.read_text(encoding="utf-8", errors="replace").splitlines(), start=1
+    ):
+        if not raw_line.strip() or raw_line.lstrip().startswith("#"):
+            continue
+        indent = len(raw_line) - len(raw_line.lstrip())
+        text = raw_line.strip()
+        while len(stack) > 1 and indent <= stack[-1][0]:
+            stack.pop()
+        parent = stack[-1][1]
+        if text.startswith("- "):
+            if not isinstance(parent, list):
+                raise GitGraphError(
+                    f"Invalid configuration at line {line_number}: list item without a list."
+                )
+            parent.append(_config_scalar(text[2:]))
+            continue
+        if ":" not in text or not isinstance(parent, dict):
+            raise GitGraphError(f"Invalid configuration at line {line_number}.")
+        key, raw_value = text.split(":", 1)
+        key = key.strip()
+        if not key:
+            raise GitGraphError(f"Invalid configuration key at line {line_number}.")
+        if not raw_value.strip():
+            child: dict[str, object] | list[object] = [] if key == "ignore" else {}
+            parent[key] = child
+            stack.append((indent, child))
+        else:
+            parent[key] = _config_scalar(raw_value)
+
+    def mapping(parent: dict[str, object], key: str) -> dict[str, object]:
+        value = parent.get(key, {})
+        if not isinstance(value, dict):
+            raise GitGraphError(f"Configuration '{key}' must be a mapping.")
+        return value
+
+    indexing = mapping(document, "indexing")
+    git_options = mapping(document, "git")
+    history = mapping(document, "history")
+    context = mapping(document, "context")
+    ignore = document.get("ignore", [])
+    if not isinstance(ignore, list) or any(not isinstance(item, str) for item in ignore):
+        raise GitGraphError("Configuration 'ignore' must be a list of patterns.")
+
+    incremental = indexing.get("incremental", True)
+    history_enabled = git_options.get("history", True)
+    co_changes_enabled = git_options.get("co_changes", True)
+    history_commits = history.get("commits", DEFAULT_HISTORY_COMMITS)
+    default_budget = context.get("default_budget", DEFAULT_CONTEXT_BUDGET)
+    for name, value in (
+        ("indexing.incremental", incremental),
+        ("git.history", history_enabled),
+        ("git.co_changes", co_changes_enabled),
+    ):
+        if not isinstance(value, bool):
+            raise GitGraphError(f"Configuration '{name}' must be true or false.")
+    for name, value, minimum, maximum in (
+        ("history.commits", history_commits, 1, 100_000),
+        ("context.default_budget", default_budget, 100, 100_000),
+    ):
+        if not isinstance(value, int) or isinstance(value, bool) or not minimum <= value <= maximum:
+            raise GitGraphError(
+                f"Configuration '{name}' must be an integer from {minimum} to {maximum}."
+            )
+    return RepositoryConfig(
+        incremental=incremental,
+        history_enabled=history_enabled,
+        co_changes_enabled=co_changes_enabled,
+        history_commits=history_commits,
+        default_budget=default_budget,
+        ignore=tuple(ignore),
+    )
 
 
 def git(root: Path, *args: str, check: bool = True) -> str:
@@ -172,28 +280,14 @@ def connect(root: Path) -> sqlite3.Connection:
 
 
 def _ignore_patterns(root: Path) -> list[str]:
-    patterns = list(DEFAULT_IGNORES)
-    for ignore_file in (root / ".gitgraphignore", root / ".gitgraph.yml"):
-        if not ignore_file.is_file():
-            continue
-        in_ignore_list = False
-        for line in ignore_file.read_text(encoding="utf-8", errors="replace").splitlines():
-            stripped = line.strip()
-            if ignore_file.name == ".gitgraph.yml":
-                if stripped == "ignore:":
-                    in_ignore_list = True
-                    continue
-                if in_ignore_list and line and not line[0].isspace():
-                    in_ignore_list = False
-                if not in_ignore_list:
-                    continue
-                match = re.match(r"^\s*-\s*(.*?)\s*$", line)
-                if match:
-                    pattern = match.group(1).strip("\"'")
-                    if pattern:
-                        patterns.append(pattern)
-            elif stripped and not stripped.startswith("#"):
-                patterns.append(stripped)
+    patterns = [*DEFAULT_IGNORES, *load_config(root).ignore]
+    ignore_file = root / ".gitgraphignore"
+    if ignore_file.is_file():
+        patterns.extend(
+            line.strip()
+            for line in ignore_file.read_text(encoding="utf-8", errors="replace").splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        )
     return patterns
 
 
@@ -220,13 +314,57 @@ def _tracked_and_new_paths(root: Path) -> set[str]:
     return {name.decode("utf-8", errors="replace") for name in raw.encode().split(b"\0") if name}
 
 
-def _commit_history(root: Path, conn: sqlite3.Connection, last_commit: str | None) -> None:
+def _commit_history(
+    root: Path,
+    conn: sqlite3.Connection,
+    last_commit: str | None,
+    history_enabled: bool,
+    history_commits: int,
+) -> None:
     head = git(root, "rev-parse", "--verify", "HEAD", check=False).strip()
+    previous_settings = dict(
+        conn.execute(
+            "SELECT key, value FROM metadata WHERE key IN "
+            "('history_enabled', 'history_commits')"
+        )
+    )
+    settings_changed = (
+        previous_settings.get("history_enabled") != str(history_enabled).lower()
+        or previous_settings.get("history_commits") != str(history_commits)
+    )
+    if not history_enabled:
+        conn.execute("DELETE FROM commit_files")
+        conn.execute("DELETE FROM renames")
+        conn.execute("DELETE FROM commits")
+        conn.execute(
+            "DELETE FROM graph_edges WHERE type IN ('CHANGED_IN', 'RENAMED_IN', 'CO_CHANGED_WITH')"
+        )
+        conn.execute("DELETE FROM graph_nodes WHERE type='Commit'")
+        conn.execute(
+            "DELETE FROM graph_nodes WHERE type='File' AND id NOT IN "
+            "(SELECT 'file:' || path FROM files)"
+        )
+        if head:
+            conn.execute(
+                "INSERT INTO metadata(key, value) VALUES('last_commit', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (head,),
+            )
+        conn.execute(
+            "INSERT INTO metadata(key, value) VALUES('history_enabled', 'false') "
+            "ON CONFLICT(key) DO UPDATE SET value='false'"
+        )
+        conn.execute(
+            "INSERT INTO metadata(key, value) VALUES('history_commits', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (str(history_commits),),
+        )
+        return
     if not head:
         return
     full_scan = not last_commit or (
         last_commit != head and not _is_ancestor(root, last_commit, head)
-    )
+    ) or settings_changed
     if full_scan:
         conn.execute("DELETE FROM commit_files")
         conn.execute("DELETE FROM renames")
@@ -235,7 +373,13 @@ def _commit_history(root: Path, conn: sqlite3.Connection, last_commit: str | Non
             "DELETE FROM graph_edges WHERE type IN ('CHANGED_IN', 'RENAMED_IN', 'CO_CHANGED_WITH')"
         )
         conn.execute("DELETE FROM graph_nodes WHERE type='Commit'")
-        revisions = git(root, "log", "-n", "100", "--format=%H%x09%an%x09%s%x09%cI").splitlines()
+        revisions = git(
+            root,
+            "log",
+            "-n",
+            str(history_commits),
+            "--format=%H%x09%an%x09%s%x09%cI",
+        ).splitlines()
         revisions.reverse()
     elif last_commit == head:
         revisions = []
@@ -322,6 +466,46 @@ def _commit_history(root: Path, conn: sqlite3.Connection, last_commit: str | Non
         "INSERT INTO metadata(key, value) VALUES('last_commit', ?) "
         "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
         (head,),
+    )
+    conn.execute(
+        "DELETE FROM commits WHERE hash NOT IN "
+        "(SELECT hash FROM commits ORDER BY committed_at DESC LIMIT ?)",
+        (history_commits,),
+    )
+    conn.execute(
+        "DELETE FROM commit_files WHERE commit_hash NOT IN (SELECT hash FROM commits)"
+    )
+    conn.execute("DELETE FROM renames WHERE commit_hash NOT IN (SELECT hash FROM commits)")
+    conn.execute(
+        "DELETE FROM graph_edges WHERE type='CHANGED_IN' "
+        "AND target NOT IN (SELECT 'commit:' || hash FROM commits)"
+    )
+    conn.execute("DELETE FROM graph_nodes WHERE type='Commit' AND id NOT IN "
+                 "(SELECT 'commit:' || hash FROM commits)")
+    conn.execute("DELETE FROM graph_edges WHERE type='RENAMED_IN'")
+    for old_path, new_path in conn.execute(
+        "SELECT DISTINCT old_path, new_path FROM renames"
+    ).fetchall():
+        conn.execute(
+            "INSERT OR REPLACE INTO graph_edges(source, target, type) "
+            "VALUES (?, ?, 'RENAMED_IN')",
+            (f"file:{old_path}", f"file:{new_path}"),
+        )
+    conn.execute(
+        "DELETE FROM graph_nodes WHERE type='File' AND id NOT IN "
+        "(SELECT 'file:' || path FROM files) "
+        "AND id NOT IN ("
+        "SELECT source FROM graph_edges WHERE type IN ('CHANGED_IN', 'RENAMED_IN') "
+        "UNION SELECT target FROM graph_edges WHERE type IN ('CHANGED_IN', 'RENAMED_IN'))"
+    )
+    conn.execute(
+        "INSERT INTO metadata(key, value) VALUES('history_enabled', 'true') "
+        "ON CONFLICT(key) DO UPDATE SET value='true'"
+    )
+    conn.execute(
+        "INSERT INTO metadata(key, value) VALUES('history_commits', ?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (str(history_commits),),
     )
 
 
@@ -473,12 +657,17 @@ def _sync_graph(conn: sqlite3.Connection, changed_paths: set[str]) -> None:
                     )
 
 
-def _sync_cochanges(conn: sqlite3.Connection) -> None:
+def _sync_cochanges(conn: sqlite3.Connection, enabled: bool, history_commits: int) -> None:
     conn.execute("DELETE FROM graph_edges WHERE type='CO_CHANGED_WITH'")
+    if not enabled:
+        return
     commit_rows = conn.execute(
         "SELECT commit_hash, path FROM commit_files "
-        "WHERE commit_hash IN (SELECT hash FROM commits ORDER BY committed_at DESC LIMIT 100) "
+        "WHERE commit_hash IN "
+        "(SELECT hash FROM commits ORDER BY committed_at DESC LIMIT ?) "
         "ORDER BY commit_hash, path"
+        ,
+        (history_commits,),
     ).fetchall()
     by_commit: dict[str, list[str]] = {}
     for commit_hash, path in commit_rows:
@@ -504,6 +693,7 @@ def _sync_cochanges(conn: sqlite3.Connection) -> None:
 
 def index_repository(root: Path) -> dict[str, int]:
     root = root.resolve()
+    config = load_config(root)
     conn = connect(root)
     patterns = _ignore_patterns(root)
     previous = dict(conn.execute("SELECT path, digest FROM files"))
@@ -535,7 +725,7 @@ def index_repository(root: Path) -> dict[str, int]:
         if ("R" in entry[:2] or "C" in entry[:2]) and i < len(entries):
             working_changed.add(entries[i])
             i += 1
-    if force_reindex or not last_commit or not is_descendant:
+    if force_reindex or not config.incremental or not last_commit or not is_descendant:
         to_check = _tracked_and_new_paths(root)
     else:
         to_check = changed_by_commits | working_changed
@@ -550,7 +740,13 @@ def index_repository(root: Path) -> dict[str, int]:
     }
     updated = removed = 0
     with conn:
-        _commit_history(root, conn, last_commit)
+        _commit_history(
+            root,
+            conn,
+            last_commit,
+            config.history_enabled,
+            config.history_commits,
+        )
         for path in deleted:
             if is_ignored(path, patterns) or path not in tracked_after or not (root / path).is_file():
                 conn.execute("DELETE FROM files WHERE path=?", (path,))
@@ -571,7 +767,7 @@ def index_repository(root: Path) -> dict[str, int]:
                 changed_graph_paths.add(path)
                 continue
             digest = hashlib.sha256(data).hexdigest()
-            if not force_reindex and previous.get(path) == digest:
+            if config.incremental and not force_reindex and previous.get(path) == digest:
                 continue
             text = data.decode("utf-8", errors="replace")
             if any(SECRET_LINE.search(line) for line in text.splitlines()):
@@ -598,7 +794,7 @@ def index_repository(root: Path) -> dict[str, int]:
             changed_graph_paths.add(path)
             updated += 1
         _sync_graph(conn, changed_graph_paths)
-        _sync_cochanges(conn)
+        _sync_cochanges(conn, config.co_changes_enabled, config.history_commits)
         conn.execute(
             "INSERT INTO metadata(key, value) VALUES('index_version', ?) "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -666,7 +862,11 @@ def _terms(text: str) -> set[str]:
     return terms
 
 
-def context_for(root: Path, task: str, budget: int = 2000) -> dict[str, object]:
+def context_for(
+    root: Path, task: str, budget: int | None = None
+) -> dict[str, object]:
+    if budget is None:
+        budget = load_config(root).default_budget
     if budget < 100:
         raise GitGraphError("Token budget must be at least 100.")
     conn = connect(root)

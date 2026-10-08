@@ -46,6 +46,7 @@ def _init(root: Path) -> dict[str, object]:
             "indexing:\n  incremental: true\n"
             "languages:\n  auto_detect: true\n"
             "git:\n  history: true\n  co_changes: true\n"
+            "history:\n  commits: 100\n"
             "semantic:\n  enabled: false\n"
             "context:\n  default_budget: 2000\n"
             "ignore:\n  - .env\n  - \"*.pem\"\n  - \"*.key\"\n  - secrets/\n  - credentials/\n",
@@ -215,7 +216,12 @@ def _mcp(root: Path) -> None:
                 name = params.get("name")
                 args = params.get("arguments", {})
                 if name == "repo_context":
-                    value = context_for(root, args.get("task", ""), int(args.get("token_budget", 2000)))
+                    token_budget = args.get("token_budget")
+                    value = context_for(
+                        root,
+                        args.get("task", ""),
+                        int(token_budget) if token_budget is not None else None,
+                    )
                 elif name == "repo_status":
                     value = repository_status(root)
                 elif name == "repo_history":
@@ -264,7 +270,7 @@ def main(argv: list[str] | None = None) -> int:
         sub.add_argument("--json", action="store_true")
     context = subparsers.add_parser("context", help="Retrieve compact context for a task")
     context.add_argument("task")
-    context.add_argument("--budget", type=int, default=2000)
+    context.add_argument("--budget", type=int)
     context.add_argument("--json", action="store_true")
     history = subparsers.add_parser("history", help="Show indexed history for a file")
     history.add_argument("path")

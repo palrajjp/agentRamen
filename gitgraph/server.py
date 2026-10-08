@@ -81,7 +81,9 @@ def create_server(root: Path, host: str = "127.0.0.1", port: int = 8765):
                     value = context_for(
                         root,
                         str(request.get("task", "")),
-                        int(request.get("token_budget", 2000)),
+                        int(request["token_budget"])
+                        if request.get("token_budget") is not None
+                        else None,
                     )
                 elif path == "/api/v1/search":
                     value = repo_search(

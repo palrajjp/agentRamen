@@ -7,11 +7,18 @@ from pathlib import Path
 
 from .core import (
     GitGraphError,
+    architecture,
+    architecture_at,
     connect,
     context_for,
+    explain_file,
     file_history,
     find_root,
+    git,
+    graph_export,
+    hotspots,
     index_repository,
+    repo_search,
     repository_status,
 )
 
@@ -60,24 +67,15 @@ def _init(root: Path) -> dict[str, object]:
 
 
 def _impact(root: Path, target: str) -> dict[str, object]:
-    conn = connect(root)
-    files = conn.execute("SELECT path, imports, symbols FROM files").fetchall()
-    by_name = {}
-    for path, imports, symbols in files:
-        by_name[path] = (json.loads(imports), json.loads(symbols))
-    target_name = Path(target).name
-    target_stem = Path(target).stem
-    direct = []
-    for path, (imports, symbols) in by_name.items():
-        if path == target:
-            continue
-        if any(Path(item).name in (target_name, target_stem) for item in imports):
-            direct.append(path)
-        elif any(symbol in " ".join(imports) for symbol in by_name.get(target, ([], []))[1]):
-            direct.append(path)
-    history = file_history(root, target)
-    conn.close()
-    return {"target": target, "direct_dependents": sorted(set(direct)), "history": history}
+    report = explain_file(root, target)
+    return {
+        "target": target,
+        "direct_dependents": report["dependents"],
+        "dependencies": report["dependencies"],
+        "co_changes": report["co_changes"],
+        "history": report["history"],
+        "estimated_impact": len(report["dependents"]),
+    }
 
 
 def _mcp(root: Path) -> None:
@@ -108,6 +106,51 @@ def _mcp(root: Path) -> None:
                 "required": ["path"],
             },
         },
+        {
+            "name": "repo_search",
+            "description": "Search indexed file paths and symbols.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}},
+                "required": ["query"],
+            },
+        },
+        {
+            "name": "repo_explain",
+            "description": "Explain a file's symbols, dependencies, dependents, and history.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"],
+            },
+        },
+        {
+            "name": "repo_impact",
+            "description": "Show direct dependencies, dependents, and historical coupling.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"],
+            },
+        },
+        {
+            "name": "repo_architecture",
+            "description": "Summarize repository languages, modules, and graph relationships.",
+            "inputSchema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": "repo_hotspots",
+            "description": "List files with the most recorded Git changes.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"limit": {"type": "integer"}},
+            },
+        },
+        {
+            "name": "repo_graph",
+            "description": "Export the indexed nodes and relationships.",
+            "inputSchema": {"type": "object", "properties": {}},
+        },
     ]
     for line in sys.stdin:
         message = {}
@@ -136,6 +179,18 @@ def _mcp(root: Path) -> None:
                     value = repository_status(root)
                 elif name == "repo_history":
                     value = file_history(root, args.get("path", ""))
+                elif name == "repo_search":
+                    value = repo_search(root, args.get("query", ""), int(args.get("limit", 20)))
+                elif name == "repo_explain":
+                    value = explain_file(root, args.get("path", ""))
+                elif name == "repo_impact":
+                    value = _impact(root, args.get("path", ""))
+                elif name == "repo_architecture":
+                    value = architecture(root)
+                elif name == "repo_hotspots":
+                    value = hotspots(root, int(args.get("limit", 20)))
+                elif name == "repo_graph":
+                    value = graph_export(root)
                 else:
                     raise GitGraphError(f"Unknown MCP tool: {name}")
                 result = {
@@ -170,6 +225,28 @@ def main(argv: list[str] | None = None) -> int:
     impact = subparsers.add_parser("impact", help="Find files that import a target")
     impact.add_argument("target")
     impact.add_argument("--json", action="store_true")
+    explain = subparsers.add_parser("explain", help="Explain a file and its relationships")
+    explain.add_argument("path")
+    explain.add_argument("--json", action="store_true")
+    search = subparsers.add_parser("search", help="Search indexed paths and symbols")
+    search.add_argument("query")
+    search.add_argument("--limit", type=int, default=20)
+    search.add_argument("--json", action="store_true")
+    arch = subparsers.add_parser("architecture", help="Summarize repository structure")
+    arch.add_argument("--at", dest="revision")
+    arch.add_argument("--json", action="store_true")
+    hot = subparsers.add_parser("hotspots", help="List frequently changed files")
+    hot.add_argument("--limit", type=int, default=20)
+    hot.add_argument("--json", action="store_true")
+    export = subparsers.add_parser("export", help="Export the current graph")
+    export.add_argument("--json", action="store_true")
+    diff = subparsers.add_parser("diff", help="Compare files changed between two commits")
+    diff.add_argument("commit1")
+    diff.add_argument("commit2")
+    diff.add_argument("--json", action="store_true")
+    serve = subparsers.add_parser("serve", help="Start the local versioned HTTP API")
+    serve.add_argument("--host", default="127.0.0.1")
+    serve.add_argument("--port", type=int, default=8765)
     args = parser.parse_args(argv)
     try:
         root = find_root()
@@ -185,6 +262,27 @@ def main(argv: list[str] | None = None) -> int:
             value = file_history(root, args.path)
         elif args.command == "impact":
             value = _impact(root, args.target)
+        elif args.command == "explain":
+            value = explain_file(root, args.path)
+        elif args.command == "search":
+            value = repo_search(root, args.query, args.limit)
+        elif args.command == "architecture":
+            value = architecture_at(root, args.revision) if args.revision else architecture(root)
+        elif args.command == "hotspots":
+            value = hotspots(root, args.limit)
+        elif args.command == "export":
+            value = graph_export(root)
+        elif args.command == "diff":
+            value = [
+                {"status": line[:1], "path": line[1:].strip()}
+                for line in git(root, "diff", "--name-status", args.commit1, args.commit2).splitlines()
+                if len(line) >= 2
+            ]
+        elif args.command == "serve":
+            from .server import serve as serve_api
+
+            serve_api(root, args.host, args.port)
+            return 0
         else:
             _mcp(root)
             return 0

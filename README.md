@@ -7,6 +7,8 @@
 
 **A local map of your codebase, ready for the next coding task.**
 
+*Persistent memory for your Git repo and AI coding agents.*
+
 GitGraph indexes source structure and Git history into a local SQLite graph, then retrieves the files and excerpts most relevant to a task. Use it from the CLI, an MCP-compatible coding agent, or its local HTTP interface. No hosted service, API key, or runtime dependency is required by default.
 
 ## Quick start
@@ -22,6 +24,10 @@ gitgraph impact src/auth.py
 ```
 
 `gitgraph init` creates the configuration, indexes the repository, and offers an optional GitHub Actions caller workflow. The index is stored locally in `.gitgraph/graph.db`.
+
+Try it in 30 seconds with [`examples/demo.sh`](examples/demo.sh). See the [roadmap](ROADMAP.md) and [contributing guide](CONTRIBUTING.md).
+
+A minimal [VS Code extension](vscode-extension/README.md) is also available.
 
 ## What it can do
 

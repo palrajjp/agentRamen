@@ -1,0 +1,31 @@
+{
+  "name": "gitgraph-vscode",
+  "displayName": "GitGraph",
+  "description": "Persistent memory for your Git repo: task context, impact and history from the local GitGraph index.",
+  "version": "0.1.0",
+  "publisher": "palrajjp",
+  "license": "Apache-2.0",
+  "repository": { "type": "git", "url": "https://github.com/palrajjp/gitGraph.git" },
+  "engines": { "vscode": "^1.80.0" },
+  "categories": ["Other"],
+  "main": "./extension.js",
+  "activationEvents": [],
+  "contributes": {
+    "commands": [
+      { "command": "gitgraph.index", "title": "GitGraph: Index Repository" },
+      { "command": "gitgraph.context", "title": "GitGraph: Find Context for Task" },
+      { "command": "gitgraph.impact", "title": "GitGraph: Show Impact of Current File" },
+      { "command": "gitgraph.history", "title": "GitGraph: Show History of Current File" }
+    ],
+    "configuration": {
+      "title": "GitGraph",
+      "properties": {
+        "gitgraph.executable": {
+          "type": "string",
+          "default": "gitgraph",
+          "description": "Path to the gitgraph CLI."
+        }
+      }
+    }
+  }
+}

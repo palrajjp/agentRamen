@@ -5,12 +5,29 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "gitgraph"
 version = "0.1.0"
-description = "Local-first Git history and repository context for coding agents"
+description = "Local-first repository intelligence and task context for coding agents"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
 authors = [{ name = "GitGraph contributors" }]
+keywords = ["git", "code-intelligence", "repository-analysis", "coding-agents", "mcp"]
+classifiers = [
+	"Development Status :: 3 - Alpha",
+	"License :: OSI Approved :: Apache Software License",
+	"Operating System :: OS Independent",
+	"Programming Language :: Python :: 3",
+	"Programming Language :: Python :: 3.10",
+	"Programming Language :: Python :: 3.11",
+	"Programming Language :: Python :: 3.12",
+	"Programming Language :: Python :: 3.13",
+	"Topic :: Software Development :: Version Control :: Git",
+]
 dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/palrajjp/gitGraph"
+Repository = "https://github.com/palrajjp/gitGraph"
+Issues = "https://github.com/palrajjp/gitGraph/issues"
 
 [project.optional-dependencies]
 treesitter = ["tree-sitter-language-pack>=1.21.0"]

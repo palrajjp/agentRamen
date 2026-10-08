@@ -1,6 +1,62 @@
 # GitGraph
 
-GitGraph is a local-first memory layer for Git repositories. It maintains a SQLite repository graph with files, symbols, imports, calls, dependencies, commits, renames, and co-change relationships, then retrieves task-relevant files and source excerpts. The goal is to help coding agents find useful context without repeatedly exploring every file.
+[![CI](https://github.com/palrajjp/gitGraph/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/palrajjp/gitGraph/actions/workflows/tests.yml)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-3776AB.svg)](https://www.python.org/)
+[![Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-4C8BF5.svg)](LICENSE)
+[![GitHub stars](https://img.shields.io/github/stars/palrajjp/gitGraph?style=social)](https://github.com/palrajjp/gitGraph/stargazers)
+
+**A local map of your codebase, ready for the next coding task.**
+
+GitGraph indexes source structure and Git history into a local SQLite graph, then retrieves the files and excerpts most relevant to a task. Use it from the CLI, an MCP-compatible coding agent, or its local HTTP interface. No hosted service, API key, or runtime dependency is required by default.
+
+## Quick start
+
+Install GitGraph, then run it from the repository you want to explore:
+
+```bash
+python -m pip install git+https://github.com/palrajjp/gitGraph.git
+cd /path/to/your/repository
+gitgraph init
+gitgraph context "Add authentication" --budget 2000
+gitgraph impact src/auth.py
+```
+
+`gitgraph init` creates the configuration, indexes the repository, and offers an optional GitHub Actions caller workflow. The index is stored locally in `.gitgraph/graph.db`.
+
+## What it can do
+
+- **Find task context:** rank files using paths, symbols, imports, Git history, and optional local semantic similarity.
+- **Explain change impact:** inspect dependencies, dependents, co-changes, hotspots, and file history.
+- **Map repository structure:** explore architecture, export the graph, and query cached commit snapshots.
+- **Connect to coding agents:** expose repository tools over MCP stdio, or use the local HTTP API and browser UI.
+- **Keep data local:** index and optional embeddings stay in the repository's local database; source excerpts are read on demand.
+
+## How it works
+
+```mermaid
+flowchart LR
+  repo[Working tree and Git history] --> indexer[Indexer and language analyzers]
+  indexer --> db[(Local SQLite graph)]
+  optional[Optional local embeddings] --> db
+  task[Task or query] --> clients[CLI, MCP, or local HTTP]
+  clients --> retrieve[Retrieval and graph queries]
+  retrieve <--> db
+  retrieve --> excerpts[Ranked files and source excerpts]
+```
+
+The default install uses the Python standard library and conservative analysis for other languages. Optional extras add Tree-sitter parsing, local semantic retrieval, and model-aware token counting.
+
+## Install options
+
+To install from a local checkout instead:
+
+```bash
+git clone https://github.com/palrajjp/gitGraph.git
+cd gitGraph
+python -m pip install .
+```
+
+Optional extras enable structured parsing for additional languages and local semantic retrieval:
 
 GitGraph's default installation runs locally with no runtime dependencies. Python files use the standard-library AST; other supported extensions use conservative regex analysis unless the optional Tree-sitter extra is installed. Source excerpts are read on demand for context. When semantic retrieval is enabled, locally generated embeddings are also stored in `.gitgraph/graph.db`; source and embeddings are not sent to a GitGraph service.
 
@@ -153,4 +209,4 @@ python -m unittest discover -s tests -v
 python -m gitgraph.cli status --json
 ```
 
-Apache-2.0 licensed. Contributions that add language analyzers should keep parser-specific behavior separate from the indexing and context interfaces.
+If GitGraph is useful in your workflow, [a GitHub star](https://github.com/palrajjp/gitGraph/stargazers) helps other developers find it. Contributions that add language analyzers should keep parser-specific behavior separate from the indexing and context interfaces; see [CONTRIBUTING.md](CONTRIBUTING.md).

@@ -253,6 +253,128 @@ class GitGraphIndexTests(unittest.TestCase):
         with self.assertRaisesRegex(GitGraphError, "context.default_budget"):
             load_config(self.root)
 
+    def test_context_uses_configured_tokenizer_consistently_with_budget(self):
+        from gitgraph.core import _TOKENIZERS, _count_context_tokens
+
+        (self.root / ".gitgraph.yml").write_text(
+            "context:\n  tokenizer_model: test-model\n", encoding="utf-8"
+        )
+        (self.root / "auth.py").write_text(
+            "class AuthService:\n    def login(self): return True\n", encoding="utf-8"
+        )
+        self.commit("add auth")
+        index_repository(self.root)
+
+        class CharacterEncoding:
+            def encode(self, text):
+                return list(text)
+
+        _TOKENIZERS["test-model"] = CharacterEncoding()
+        try:
+            (self.root / "auth.py").write_text(
+                "class AuthService:\n" + "    def login(self): return True\n" * 40,
+                encoding="utf-8",
+            )
+            self.commit("expand auth")
+            index_repository(self.root)
+            context = context_for(self.root, "auth login", 600)
+            content = [
+                {key: value for key, value in item.items() if key != "estimated_tokens"}
+                for item in context["files"]
+            ]
+            expected = _count_context_tokens(
+                {"files": content}, "test-model"
+            )
+            self.assertEqual(context["token_count_method"], "tiktoken")
+            self.assertEqual(context["tokenizer_model"], "test-model")
+            self.assertEqual(context["estimated_tokens"], expected)
+            self.assertLessEqual(context["estimated_tokens"], context["token_budget"])
+            self.assertTrue(context["files"])
+            self.assertGreater(context["files"][0]["estimated_tokens"], 0)
+            self.assertLess(len(context["files"][0]["excerpt"]), 480)
+        finally:
+            _TOKENIZERS.pop("test-model", None)
+
+    def test_context_fallback_reports_approximate_serialized_payload_count(self):
+        from gitgraph.core import _count_context_tokens
+
+        (self.root / "auth.py").write_text("class Auth:\n    pass\n", encoding="utf-8")
+        self.commit("add auth")
+        index_repository(self.root)
+
+        context = context_for(self.root, "Auth", 300)
+        content = [
+            {key: value for key, value in item.items() if key != "estimated_tokens"}
+            for item in context["files"]
+        ]
+        expected = _count_context_tokens(
+            {"files": content}, ""
+        )
+        self.assertEqual(context["token_count_method"], "approximate")
+        self.assertIsNone(context["tokenizer_model"])
+        self.assertEqual(context["estimated_tokens"], expected)
+        self.assertLessEqual(context["estimated_tokens"], context["token_budget"])
+
+    def test_context_uses_configured_tiktoken_model_encoding(self):
+        try:
+            import tiktoken
+        except ImportError:
+            self.skipTest("Tokenizer optional dependency is not installed")
+        from gitgraph.core import _TOKENIZERS
+
+        model = "gpt-4o-mini"
+        (self.root / ".gitgraph.yml").write_text(
+            f"context:\n  tokenizer_model: {model}\n", encoding="utf-8"
+        )
+        (self.root / "auth.py").write_text("class Auth:\n    pass\n", encoding="utf-8")
+        self.commit("add auth")
+        index_repository(self.root)
+        _TOKENIZERS.pop(model, None)
+
+        class CharacterEncoding:
+            def encode(self, text):
+                return list(text)
+
+        with patch(
+            "tiktoken.encoding_for_model", return_value=CharacterEncoding()
+        ) as encoding_for_model:
+            context = context_for(self.root, "Auth", 500)
+        encoding_for_model.assert_called_once_with(model)
+        content = [
+            {key: value for key, value in item.items() if key != "estimated_tokens"}
+            for item in context["files"]
+        ]
+        self.assertEqual(
+            context["estimated_tokens"],
+            len(json.dumps({"files": content}, ensure_ascii=False, separators=(",", ":"))),
+        )
+        self.assertEqual(context["token_count_method"], "tiktoken")
+        _TOKENIZERS.pop(model, None)
+
+    def test_tokenizer_configuration_requires_string(self):
+        (self.root / ".gitgraph.yml").write_text(
+            "context:\n  tokenizer_model: true\n", encoding="utf-8"
+        )
+        with self.assertRaisesRegex(GitGraphError, "context.tokenizer_model"):
+            load_config(self.root)
+
+    def test_semantic_benchmark_comparison_reports_unavailable_model(self):
+        from gitgraph.benchmark import run_comparisons
+
+        with patch(
+            "gitgraph.benchmark.run_benchmark",
+            side_effect=[
+                {"semantic_enabled": False, "context_retrieval_seconds": 0.01},
+                GitGraphError("embedding model unavailable"),
+            ],
+        ):
+            result = run_comparisons([10], None, (False, True))
+
+        self.assertEqual(len(result), 2)
+        self.assertFalse(result[0]["semantic_enabled"])
+        self.assertTrue(result[1]["semantic_enabled"])
+        self.assertEqual(result[1]["error"], "embedding model unavailable")
+
     def test_local_http_api_exposes_versioned_context(self):
         from gitgraph.server import create_server
 

@@ -67,7 +67,9 @@ INDEX_VERSION = "5-treesitter" if _TREE_SITTER_AVAILABLE else "5-regex"
 DEFAULT_CONTEXT_BUDGET = 2000
 DEFAULT_HISTORY_COMMITS = 100
 DEFAULT_EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
+DEFAULT_TOKENIZER_MODEL = ""
 _EMBEDDING_MODELS: dict[str, object] = {}
+_TOKENIZERS: dict[str, object] = {}
 
 
 class GitGraphError(RuntimeError):
@@ -83,6 +85,7 @@ class RepositoryConfig:
     default_budget: int = DEFAULT_CONTEXT_BUDGET
     semantic_enabled: bool = False
     embedding_model: str = DEFAULT_EMBEDDING_MODEL
+    tokenizer_model: str = DEFAULT_TOKENIZER_MODEL
     ignore: tuple[str, ...] = ()
 
 
@@ -155,6 +158,7 @@ def load_config(root: Path) -> RepositoryConfig:
     co_changes_enabled = git_options.get("co_changes", True)
     history_commits = history.get("commits", DEFAULT_HISTORY_COMMITS)
     default_budget = context.get("default_budget", DEFAULT_CONTEXT_BUDGET)
+    tokenizer_model = context.get("tokenizer_model", DEFAULT_TOKENIZER_MODEL)
     semantic_enabled = semantic.get("enabled", False)
     embedding_model = semantic.get("model", DEFAULT_EMBEDDING_MODEL)
     for name, value in (
@@ -175,6 +179,8 @@ def load_config(root: Path) -> RepositoryConfig:
             )
     if not isinstance(embedding_model, str) or not embedding_model.strip():
         raise GitGraphError("Configuration 'semantic.model' must be a non-empty string.")
+    if not isinstance(tokenizer_model, str):
+        raise GitGraphError("Configuration 'context.tokenizer_model' must be a string.")
     return RepositoryConfig(
         incremental=incremental,
         history_enabled=history_enabled,
@@ -183,6 +189,7 @@ def load_config(root: Path) -> RepositoryConfig:
         default_budget=default_budget,
         semantic_enabled=semantic_enabled,
         embedding_model=embedding_model,
+        tokenizer_model=tokenizer_model.strip(),
         ignore=tuple(ignore),
     )
 
@@ -1019,6 +1026,31 @@ def _batches(values: set[str] | list[str], batch_size: int = 900):
         yield ordered[offset : offset + batch_size]
 
 
+def _count_context_tokens(value: object, tokenizer_model: str) -> int:
+    serialized = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    if not tokenizer_model:
+        return (len(serialized) + 3) // 4
+    if tokenizer_model not in _TOKENIZERS:
+        try:
+            import tiktoken
+        except ImportError as exc:
+            raise GitGraphError(
+                "Tokenizer counting requires the optional dependency; install gitgraph[tokenizer]."
+            ) from exc
+        try:
+            _TOKENIZERS[tokenizer_model] = tiktoken.encoding_for_model(tokenizer_model)
+        except KeyError as exc:
+            raise GitGraphError(
+                f"No tokenizer encoding is known for model '{tokenizer_model}'."
+            ) from exc
+        except Exception as exc:
+            raise GitGraphError(
+                f"Could not initialize tokenizer for model '{tokenizer_model}': {exc}"
+            ) from exc
+    encoding = _TOKENIZERS[tokenizer_model]
+    return len(encoding.encode(serialized))
+
+
 def context_for(
     root: Path, task: str, budget: int | None = None
 ) -> dict[str, object]:
@@ -1192,26 +1224,15 @@ def context_for(
         )
         ranked.append((relation_score, source_path, language, size, symbols, imports))
     ranked.sort(key=lambda item: (-item[0], item[1]))
-    selected = []
-    used_tokens = 30
+    selected: list[dict[str, object]] = []
+    selected_content: list[dict[str, object]] = []
+    used_tokens = _count_context_tokens({"files": selected_content}, config.tokenizer_model)
     for score, path, language, size, symbols, imports in ranked:
-        details = []
-        if symbols:
-            details.append("symbols: " + ", ".join(symbols[:8]))
-        if imports:
-            details.append("imports: " + ", ".join(imports[:6]))
         recent = history_by_path.get(path, [])
-        if recent:
-            details.append("recent: " + recent[0][0][:100])
         related_files = [
             {"path": target, "relationship": kind.lower(), "weight": weight}
             for target, kind, weight in relations.get(path, [])[:8]
         ]
-        if related_files:
-            details.append("related: " + ", ".join(item["path"] for item in related_files[:4]))
-        estimate = max(12, (len(path) + len(" ".join(details))) // 4)
-        if used_tokens + estimate > budget:
-            continue
         excerpt = ""
         source_path = root / path
         try:
@@ -1234,37 +1255,58 @@ def context_for(
                         selected_lines.update(range(max(0, line_number - 1), min(len(source_lines), line_number + 2)))
                     if not selected_lines:
                         selected_lines.update(range(min(8, len(source_lines))))
-                    remaining_chars = min(480, max(0, (budget - used_tokens - estimate) * 4))
                     snippet = "\n".join(
                         f"{line_number + 1}: {source_lines[line_number]}"
                         for line_number in sorted(selected_lines)
                     )
-                    excerpt = snippet[:remaining_chars] if remaining_chars >= 8 else ""
+                    excerpt = snippet[:480]
         except OSError:
             pass
-        excerpt_tokens = (len(excerpt) + 3) // 4
-        if used_tokens + estimate + excerpt_tokens > budget:
-            excerpt = ""
-            excerpt_tokens = 0
-        selected.append(
-            {
-                "path": path,
-                "language": language,
-                "score": round(score, 3),
-                "symbols": symbols[:8],
-                "imports": imports[:6],
-                "recent_change": recent[0][0] if recent else None,
-                "relationships": related_files,
-                "excerpt": excerpt,
-                "estimated_tokens": estimate + excerpt_tokens,
-            }
+        content = {
+            "path": path,
+            "language": language,
+            "score": round(score, 3),
+            "symbols": symbols[:8],
+            "imports": imports[:6],
+            "recent_change": recent[0][0] if recent else None,
+            "relationships": related_files,
+            "excerpt": excerpt,
+        }
+        candidate_content = [*selected_content, content]
+        candidate_tokens = _count_context_tokens(
+            {"files": candidate_content}, config.tokenizer_model
         )
-        used_tokens += estimate + excerpt_tokens
+        if candidate_tokens > budget and excerpt:
+            low, high = 0, len(excerpt)
+            best_excerpt = ""
+            while low <= high:
+                middle = (low + high) // 2
+                content["excerpt"] = excerpt[:middle]
+                candidate_tokens = _count_context_tokens(
+                    {"files": candidate_content}, config.tokenizer_model
+                )
+                if candidate_tokens <= budget:
+                    best_excerpt = content["excerpt"]
+                    low = middle + 1
+                else:
+                    high = middle - 1
+            content["excerpt"] = best_excerpt
+            candidate_tokens = _count_context_tokens(
+                {"files": candidate_content}, config.tokenizer_model
+            )
+        if candidate_tokens > budget:
+            continue
+        selected_content.append(content)
+        used_tokens = candidate_tokens
+        file_tokens = _count_context_tokens(content, config.tokenizer_model)
+        selected.append({**content, "estimated_tokens": file_tokens})
     return {
         "task": task,
         "files": selected,
         "estimated_tokens": used_tokens,
         "token_budget": budget,
+        "token_count_method": "tiktoken" if config.tokenizer_model else "approximate",
+        "tokenizer_model": config.tokenizer_model or None,
         "files_avoided": max(0, total_files - len(selected)),
         "confidence": "high" if len(selected) >= 3 else "medium" if selected else "low",
     }

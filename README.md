@@ -20,6 +20,7 @@ Optional extras enable structured parsing for additional languages and local sem
 ```bash
 python -m pip install '.[treesitter]'
 python -m pip install '.[semantic]'
+python -m pip install '.[tokenizer]'
 ```
 
 Semantic retrieval uses FastEmbed and may download/initialize its configured model on first use; embedding inference runs locally.
@@ -44,6 +45,7 @@ semantic:
   model: BAAI/bge-small-en-v1.5
 context:
   default_budget: 2000
+  tokenizer_model: ""
 ignore:
   - .env
   - "*.pem"
@@ -53,6 +55,8 @@ ignore:
 `indexing.incremental: false` reparses every eligible file on each index. `git.history: false` removes stored commit, rename, and co-change history; enabling it later rebuilds the configured recent history. `history.commits` controls retained commits (1–100,000), and `git.co_changes` toggles co-change edges. `context.default_budget` is used by the CLI, MCP, and HTTP API when no budget is passed. Configuration is a dependency-free YAML subset; unsupported/malformed values are rejected with a setting-specific error. `.gitgraphignore` patterns are added to, rather than replacing, the built-in and YAML ignore rules.
 
 `semantic.enabled: true` opts into local embedding generation and semantic context ranking; install `gitgraph[semantic]` first. `semantic.model` selects a FastEmbed model. `gitgraph[treesitter]` opts into Tree-sitter-based parsing for supported non-Python languages; without it, or if a grammar is unavailable, GitGraph falls back to regex analysis.
+
+`context.tokenizer_model` optionally selects a model supported by `tiktoken` for tokenizer-based context budgets; install `gitgraph[tokenizer]` to use it. The tokenizer vocabulary may be downloaded and cached on first use, then counting runs locally. Leave it empty to use the dependency-free approximate character-based fallback. Context responses identify `token_count_method` (`tiktoken` or `approximate`) and the tokenizer model when configured. The reported total counts the compact serialized `files` payload (the retrieved context), using the same method as selection and budgeting; per-file counts are provided as `estimated_tokens`.
 
 ## Commands
 
@@ -98,7 +102,7 @@ Example context response:
 }
 ```
 
-Context includes source excerpts only when the file still matches its indexed hash and does not contain a detected credential pattern. Its token count is a conservative character-based estimate, not a tokenizer measurement or performance claim.
+Context includes source excerpts only when the file still matches its indexed hash and does not contain a detected credential pattern. Token counts use the configured model tokenizer when available; otherwise they are approximate character-based estimates, not tokenizer measurements or performance claims.
 
 ## GitHub Actions
 
@@ -130,7 +134,7 @@ Run `gitgraph mcp` from a repository and configure your MCP-compatible agent to 
 
 ## Benchmarking
 
-Run `gitgraph benchmark --files 10 1000` to measure synthetic initial indexing, a one-file incremental update, and context retrieval. Add `--repository /path/to/repo` to measure a temporary copy of a real repository's tracked working-tree files as well. Output includes lexical candidate count and database size. Results are local measurements, not cross-machine guarantees.
+Run `gitgraph benchmark --files 10 1000` to measure synthetic initial indexing, a one-file incremental update, and context retrieval. Add `--repository /path/to/repo` to measure a temporary copy of a real repository's tracked working-tree files as well. Use `--semantic-mode both` to compare semantic retrieval off/on; the enabled run requires `gitgraph[semantic]` and downloads its configured model if needed. If model setup is unavailable, the comparison reports that mode as an error and still returns measurements for the successful mode. Output includes lexical candidate count, database size, and retrieval/index timings. Results are local measurements, not cross-machine guarantees.
 
 ## Privacy and exclusions
 

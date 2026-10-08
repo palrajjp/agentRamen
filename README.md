@@ -1,8 +1,8 @@
 # GitGraph
 
-GitGraph is a local-first memory layer for Git repositories. It maintains a small SQLite index of repository paths, detected languages, symbols, imports, and Git change history, then ranks a compact set of files for a coding task. The goal is to help coding agents find useful context without repeatedly exploring every file.
+GitGraph is a local-first memory layer for Git repositories. It maintains a SQLite repository graph with files, symbols, imports, calls, dependencies, commits, renames, and co-change relationships, then retrieves task-relevant files and source excerpts. The goal is to help coding agents find useful context without repeatedly exploring every file.
 
-This initial release is deliberately dependency-free and heuristic: it provides incremental file metadata indexing and lexical context retrieval, not a full AST or semantic code graph. Source contents are read locally for indexing and are not sent to any service.
+GitGraph runs locally and has no runtime dependencies. Python files use the standard-library AST; other supported extensions use conservative regex analysis. Source is read locally, but only metadata and hashes are stored in `.gitgraph/graph.db`. Source excerpts are read on demand for context and are not sent to a service.
 
 ## Install
 
@@ -26,7 +26,17 @@ gitgraph update [--json]
 gitgraph status [--json]
 gitgraph context "Add OAuth login" [--budget 2000] [--json]
 gitgraph impact src/auth/AuthService.ts [--json]
+gitgraph explain src/auth/AuthService.ts [--json]
 gitgraph history src/auth/AuthService.ts [--json]
+gitgraph search "auth login" [--limit 20] [--json]
+gitgraph architecture [--at <commit>] [--json]
+gitgraph hotspots [--limit 20] [--json]
+gitgraph changes [--limit 20] [--json]
+gitgraph diff <commit1> <commit2> [--json]
+gitgraph pr [--base origin/main] [--json]
+gitgraph export [--json]
+gitgraph benchmark --files 10 1000
+gitgraph serve [--host 127.0.0.1] [--port 8765]
 gitgraph mcp
 ```
 
@@ -51,7 +61,7 @@ Example context response:
 }
 ```
 
-The token count is a rough metadata estimate, not a measured model-token count or a performance claim.
+Context includes source excerpts only when the file still matches its indexed hash and does not contain a detected credential pattern. Its token count is a conservative character-based estimate, not a tokenizer measurement or performance claim.
 
 ## GitHub Actions
 
@@ -71,11 +81,19 @@ jobs:
     uses: palrajjp/gitGraph/.github/workflows/index.yml@main
 ```
 
-The reusable workflow fetches Git history, restores a cache, indexes the checked-out revision, and publishes the local SQLite artifact. Use a full-depth checkout when running the CLI outside this reusable workflow to retain history.
+The reusable workflow fetches Git history, restores a cache, tests the installed package, indexes the checked-out revision, summarizes pull requests, and publishes the local SQLite artifact. Use a full-depth checkout when running the CLI outside this reusable workflow to retain history.
 
 ## MCP
 
-Run `gitgraph mcp` from a repository and configure your MCP-compatible agent to launch that command in the repository working directory. The stdio server currently exposes `repo_context`, `repo_status`, and `repo_history`. It needs no API keys and does not access a network service.
+Run `gitgraph mcp` from a repository and configure your MCP-compatible agent to launch that command in the repository working directory. Tools include `repo_context`, `repo_status`, `repo_history`, `repo_search`, `repo_explain`, `repo_impact`, `repo_dependencies`, `repo_tests`, `repo_changes`, `repo_architecture`, `repo_hotspots`, and `repo_graph`. The stdio server needs no API keys and does not access a network service.
+
+## Local HTTP API
+
+`gitgraph serve` listens only on `127.0.0.1` by default. It provides `GET /health`, `GET /api/v1/repository`, `/architecture`, `/graph`, `/files/{path}`, `/impact?path=...`, `/history?path=...`, `/hotspots`, and `POST /api/v1/context` or `/api/v1/search`. POST requests accept JSON objects such as `{"task":"Add OAuth","token_budget":2000}`. No authentication is provided; do not bind to a public interface without placing an authenticated access-control layer in front.
+
+## Benchmarking
+
+Run `gitgraph benchmark --files 10 1000` to measure synthetic initial indexing, a one-file incremental update, and context retrieval on the current machine. The command reports the measured numbers for that run; it does not claim they generalize to other repositories or systems.
 
 ## Privacy and exclusions
 
@@ -83,7 +101,7 @@ The index stays in `.gitgraph/graph.db` on the local machine or in the configure
 
 ## Current limitations
 
-The first milestone does not yet implement Tree-sitter parsing, semantic embeddings, graph snapshots, a web UI, or complete symbol-level call/dependency analysis. Symbol and import extraction is intentionally lightweight and language-agnostic. Context retrieval uses lexical overlap and recent file history; its confidence and token estimates are heuristic. The SQLite artifact contains repository path and source-derived metadata only, not stored source text.
+GitGraph has not yet implemented Tree-sitter, semantic embeddings, a web UI, or full commit-addressable graph snapshots. Parsing outside Python is heuristic and call edges are currently Python-only. Import resolution supports common file/module layouts, not every workspace alias or language-specific build system. Historical indexing retains at most 100 commits on a fresh/full scan; PR architecture assessment is based on indexed dependency edges rather than semantic boundary rules. Context ranking uses lexical relevance, graph relationships, and recent history; no model-based confidence or measured tokenizer is used. Benchmark outputs must be measured locally and are not performance guarantees.
 
 ## Development
 

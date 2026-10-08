@@ -2,14 +2,17 @@ import subprocess
 import json
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
+from urllib.request import Request, urlopen
 
 from gitgraph.cli import _init
 from gitgraph.core import (
     architecture,
     connect,
     context_for,
+    dependency_impact,
     explain_file,
     graph_export,
     hotspots,
@@ -55,6 +58,8 @@ class GitGraphIndexTests(unittest.TestCase):
         self.assertEqual(result["indexed"], 1)
         self.assertEqual(repository_status(self.root)["files"], 1)
         self.assertEqual(context["files"][0]["path"], "src/auth_service.py")
+        self.assertIn("class AuthService", context["files"][0]["excerpt"])
+        self.assertLessEqual(context["estimated_tokens"], 2000)
         self.assertFalse((self.root / ".gitgraph" / "graph.db").stat().st_size == 0)
 
     def test_update_indexes_only_changed_file_and_removes_deleted_file(self):
@@ -63,6 +68,7 @@ class GitGraphIndexTests(unittest.TestCase):
         self.commit("add modules")
         initial = index_repository(self.root)
         self.assertEqual(initial["indexed"], 2)
+        self.assertEqual(index_repository(self.root)["indexed"], 0)
 
         (self.root / "auth.py").write_text("class Auth:\n    def login(self): pass\n", encoding="utf-8")
         (self.root / "billing.py").unlink()
@@ -72,6 +78,88 @@ class GitGraphIndexTests(unittest.TestCase):
         self.assertEqual(updated["indexed"], 1)
         self.assertEqual(updated["removed"], 1)
         self.assertEqual(repository_status(self.root)["files"], 1)
+
+    def test_reindex_after_history_rewind(self):
+        (self.root / "old.py").write_text("class Old:\n    pass\n", encoding="utf-8")
+        self.commit("add old")
+        index_repository(self.root)
+        (self.root / "new.py").write_text("class New:\n    pass\n", encoding="utf-8")
+        self.commit("add new")
+        index_repository(self.root)
+
+        subprocess.run(
+            ["git", "-C", str(self.root), "reset", "--hard", "HEAD~1"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+        )
+        result = index_repository(self.root)
+
+        self.assertEqual(result["files"], 1)
+        self.assertEqual(repository_status(self.root)["files"], 1)
+        nodes = graph_export(self.root)["nodes"]
+        self.assertFalse(any(node["path"] == "new.py" for node in nodes))
+
+    def test_secret_content_is_removed_from_graph_and_context(self):
+        source = self.root / "credentials.py"
+        source.write_text("class Credentials:\n    pass\n", encoding="utf-8")
+        self.commit("add credentials module")
+        index_repository(self.root)
+        source.write_text(
+            "class Credentials:\n    pass\n"
+            "api_key = 'this-is-a-long-sensitive-token-value'\n",
+            encoding="utf-8",
+        )
+
+        index_repository(self.root)
+
+        self.assertEqual(repository_status(self.root)["files"], 0)
+        self.assertFalse(
+            any(
+                node["type"] == "Symbol" and node["path"] == "credentials.py"
+                for node in graph_export(self.root)["nodes"]
+            )
+        )
+        self.assertEqual(context_for(self.root, "Credentials")["files"], [])
+
+    def test_configured_ignore_patterns_are_applied(self):
+        (self.root / ".gitgraph.yml").write_text("ignore:\n  - private/\n", encoding="utf-8")
+        (self.root / "private").mkdir()
+        (self.root / "private" / "module.py").write_text("class Hidden:\n    pass\n", encoding="utf-8")
+        (self.root / "visible.py").write_text("class Visible:\n    pass\n", encoding="utf-8")
+        self.commit("add ignored and visible files")
+
+        index_repository(self.root)
+
+        self.assertEqual(repository_status(self.root)["files"], 2)
+        self.assertEqual(repo_search(self.root, "Hidden"), [])
+
+    def test_local_http_api_exposes_versioned_context(self):
+        from gitgraph.server import create_server
+
+        (self.root / "auth.py").write_text("class AuthService:\n    pass\n", encoding="utf-8")
+        self.commit("add auth")
+        index_repository(self.root)
+        server = create_server(self.root, "127.0.0.1", 0)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            address = f"http://127.0.0.1:{server.server_port}"
+            with urlopen(address + "/api/v1/architecture") as response:
+                architecture_value = json.load(response)
+            request = Request(
+                address + "/api/v1/context",
+                data=json.dumps({"task": "AuthService", "token_budget": 500}).encode(),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urlopen(request) as response:
+                context_value = json.load(response)
+            self.assertEqual(architecture_value["files"], 1)
+            self.assertEqual(context_value["files"][0]["path"], "auth.py")
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
 
     def test_init_creates_yaml_configuration_and_workflow(self):
         result = _init(self.root)
@@ -110,6 +198,11 @@ class GitGraphIndexTests(unittest.TestCase):
             "def login_view():\n    return AuthService().login()\n",
             encoding="utf-8",
         )
+        (self.root / "dashboard.py").write_text(
+            "from views import login_view\n\n"
+            "def dashboard():\n    return login_view()\n",
+            encoding="utf-8",
+        )
         self.commit("add auth and views")
         index_repository(self.root)
 
@@ -120,8 +213,29 @@ class GitGraphIndexTests(unittest.TestCase):
         self.assertIn("CHANGED_IN", edge_types)
         self.assertIn("CO_CHANGED_WITH", edge_types)
         self.assertEqual(explain_file(self.root, "AuthService")["path"], "auth.py")
+        impact = dependency_impact(self.root, "auth.py")
+        self.assertEqual(impact["direct_dependents"], ["views.py"])
+        self.assertEqual(impact["indirect_dependents"], ["dashboard.py"])
         context = context_for(self.root, "AuthService views")
         self.assertTrue(context["files"])
+
+    def test_incremental_update_resolves_new_target_and_removes_deleted_target(self):
+        (self.root / "views.py").write_text(
+            "from auth import AuthService\n\n"
+            "def view():\n    return AuthService()\n",
+            encoding="utf-8",
+        )
+        self.commit("add importer first")
+        index_repository(self.root)
+        (self.root / "auth.py").write_text("class AuthService:\n    pass\n", encoding="utf-8")
+        self.commit("add imported module")
+        index_repository(self.root)
+
+        self.assertEqual(explain_file(self.root, "views.py")["dependencies"], ["auth.py"])
+        (self.root / "auth.py").unlink()
+        self.commit("remove imported module")
+        index_repository(self.root)
+        self.assertEqual(explain_file(self.root, "views.py")["dependencies"], [])
 
     def test_rename_is_stored_and_file_analysis_commands_work(self):
         (self.root / "old_name.py").write_text("def search_accounts(): pass\n", encoding="utf-8")

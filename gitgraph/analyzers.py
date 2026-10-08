@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import posixpath
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -123,8 +124,23 @@ def analyze(path: str, source: str, language: str | None = None) -> Analysis:
     return analyzer.analyze(path, source)
 
 
-def module_candidates(import_name: str, source_path: str, paths: set[str]) -> set[str]:
+def module_candidates(
+    import_name: str, source_path: str, paths: set[str] | None = None
+) -> set[str]:
     """Resolve an import to known source files without assuming one package layout."""
+    if import_name.startswith(("./", "../")):
+        module = posixpath.normpath(
+            posixpath.join(posixpath.dirname(source_path), import_name)
+        )
+        candidates = {
+            f"{module}{suffix}"
+            for suffix in (
+                ".py", ".js", ".jsx", ".ts", ".tsx", ".java", ".go", ".rs",
+                ".c", ".h", ".cpp", ".hpp",
+            )
+        }
+        candidates.update(f"{module}/index{suffix}" for suffix in (".js", ".ts", ".tsx"))
+        return candidates & paths if paths is not None else candidates
     relative_level = len(import_name) - len(import_name.lstrip("."))
     module = import_name.lstrip(".").replace(".", "/")
     if import_name.startswith("."):
@@ -137,5 +153,13 @@ def module_candidates(import_name: str, source_path: str, paths: set[str]) -> se
         for suffix in (".py", ".js", ".jsx", ".ts", ".tsx", ".java", ".go", ".rs")
     }
     candidates.update(f"{module}/__init__.py" for _ in (0,))
-    candidates.update(path for path in paths if path.endswith("/" + module + ".py"))
+    if paths is None:
+        return candidates
+    candidates.update(
+        path
+        for path in paths
+        if any(path.endswith("/" + module + suffix) for suffix in (
+            ".py", ".js", ".jsx", ".ts", ".tsx", ".java", ".go", ".rs"
+        ))
+    )
     return candidates & paths

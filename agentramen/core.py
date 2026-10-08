@@ -4,6 +4,7 @@ import fnmatch
 import hashlib
 import importlib.util
 import json
+import logging
 import os
 import posixpath
 import re
@@ -43,6 +44,27 @@ SECRET_LINE = re.compile(
     r"(?:api[_-]?key|secret|password|token)\s*[:=]\s*['\"]?[A-Za-z0-9_./+=-]{12,})",
     re.IGNORECASE,
 )
+PLACEHOLDER_VALUE = re.compile(
+    r"(?:fake|dummy|example|placeholder|changeme|sample|mock|not[_-]?a[_-]?real|"
+    r"test[_-]?(?:key|secret|token|password)|x{6,}|\*{4,})",
+    re.IGNORECASE,
+)
+TEST_PATH = re.compile(r"(?:^|/)(?:tests?|__tests__|spec|fixtures?|testdata)/|(?:^|/)(?:test_[^/]*|[^/]*_test\.[^/]*|[^/]*\.(?:test|spec)\.[^/]*|conftest\.py)$", re.IGNORECASE)
+LOGGER = logging.getLogger("agentramen")
+
+
+def has_secret(path: str, text: str) -> bool:
+    """Detect likely credentials, ignoring placeholder values in test fixtures."""
+    is_test = bool(TEST_PATH.search(path))
+    for line in text.splitlines():
+        if not SECRET_LINE.search(line):
+            continue
+        if is_test and "PRIVATE KEY" not in line.upper() and PLACEHOLDER_VALUE.search(line):
+            continue
+        return True
+    return False
+
+
 SYMBOL = re.compile(
     r"^\s*(?:export\s+)?(?:async\s+)?(?:class|interface|type|enum|function|def|fn|func)\s+([A-Za-z_$][\w$]*)",
     re.MULTILINE,
@@ -792,7 +814,7 @@ def _sync_file_embeddings(root: Path, conn: sqlite3.Connection, model_name: str)
         if hashlib.sha256(data).hexdigest() != digest or b"\0" in data:
             continue
         source = data.decode("utf-8", errors="replace")
-        if any(SECRET_LINE.search(line) for line in source.splitlines()):
+        if has_secret(path, source):
             continue
         from .indexer.noise_filter import filter_noise
 
@@ -895,7 +917,8 @@ def index_repository(root: Path) -> dict[str, int]:
             if config.incremental and not force_reindex and previous.get(path) == digest:
                 continue
             text = data.decode("utf-8", errors="replace")
-            if any(SECRET_LINE.search(line) for line in text.splitlines()):
+            if has_secret(path, text):
+                LOGGER.warning("excluded %s from index: credential-like content detected", path)
                 conn.execute("DELETE FROM files WHERE path=?", (path,))
                 changed_graph_paths.add(path)
                 continue
@@ -1251,7 +1274,7 @@ def _context_for_baseline(
                 and len(source_bytes) <= 2_000_000
             ):
                 source_text = source_bytes.decode("utf-8", errors="replace")
-                if not any(SECRET_LINE.search(line) for line in source_text.splitlines()):
+                if not has_secret(path, source_text):
                     source_lines = source_text.splitlines()
                     relevant = [
                         line_number
@@ -1667,7 +1690,7 @@ def graph_at(root: Path, revision: str) -> dict[str, object]:
             if len(data) > 2_000_000 or b"\0" in data:
                 continue
             source = data.decode("utf-8", errors="replace")
-            if any(SECRET_LINE.search(line) for line in source.splitlines()):
+            if has_secret(path, source):
                 continue
             analysis = analyze(path, source, language)
             files[path] = (

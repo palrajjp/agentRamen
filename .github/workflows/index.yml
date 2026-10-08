@@ -12,6 +12,15 @@ on:
         required: false
         type: number
         default: 2000
+      central_snapshot:
+        description: Export a sanitized snapshot for centralized MCP
+        required: false
+        type: boolean
+        default: false
+      repository_id:
+        description: Stable repository identifier embedded in the snapshot
+        required: false
+        type: string
   workflow_dispatch:
     inputs:
       task:
@@ -23,6 +32,15 @@ on:
         required: false
         type: number
         default: 2000
+      central_snapshot:
+        description: Export a sanitized snapshot for centralized MCP
+        required: false
+        type: boolean
+        default: false
+      repository_id:
+        description: Stable repository identifier embedded in the snapshot
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -55,6 +73,19 @@ jobs:
           python -m pip install ./.agentramen-action
           python -m unittest discover -s .agentramen-action/tests -v
           agentramen index --json
+      - name: Export centralized MCP snapshot
+        if: inputs.central_snapshot
+        env:
+          AGENTRAMEN_REPOSITORY_ID: ${{ inputs.repository_id }}
+        run: agentramen snapshot export --repository-id "$AGENTRAMEN_REPOSITORY_ID" --output "$RUNNER_TEMP/agentramen-snapshot.zip" --json
+      - name: Upload centralized MCP snapshot
+        if: inputs.central_snapshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: agentramen-snapshot-${{ github.sha }}
+          path: ${{ runner.temp }}/agentramen-snapshot.zip
+          if-no-files-found: error
+          retention-days: 14
       - name: Build task-specific context
         if: inputs.task != ''
         env:

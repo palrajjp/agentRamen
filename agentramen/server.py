@@ -8,6 +8,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
+from . import __version__
 from .core import (
     AgentRamenError,
     architecture,
@@ -125,7 +126,7 @@ loadStatus();loadHotspots();
 
 def create_server(root: Path, host: str = "127.0.0.1", port: int = 8765):
     class Handler(BaseHTTPRequestHandler):
-        server_version = "agentRamen/0.1"
+        server_version = f"agentRamen/{__version__}"
 
         def _respond(self, status: int, value: object) -> None:
             payload = json.dumps(value, ensure_ascii=False).encode("utf-8")

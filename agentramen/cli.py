@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
+from . import __version__
 from .benchmark import run_comparisons
 from .core import (
     AgentRamenError,
@@ -27,7 +29,15 @@ from .core import (
     repo_search,
     repository_status,
 )
-from .memory import approve_memory, reject_memory, review_queue
+from .memory import (
+    approve_memory,
+    publish_shared_memory,
+    reject_memory,
+    review_queue,
+    search_shared_memories,
+    stage_memory,
+)
+from .snapshots import export_snapshot, mounted_snapshot
 
 def _output(value: object, as_json: bool = False) -> None:
     if as_json:
@@ -204,6 +214,21 @@ def _mcp(root: Path) -> None:
             },
         },
         {
+            "name": "repo_stage_memory",
+            "description": "Stage a private memory proposal for human review; it is not shared until approved and published.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "subject": {"type": "string"},
+                    "content": {"type": "string"},
+                    "category": {"type": "string", "default": "context"},
+                    "source": {"type": "string"},
+                    "importance_score": {"type": "number", "default": 0.5},
+                },
+                "required": ["subject", "content"],
+            },
+        },
+        {
             "name": "repo_approve_memory",
             "description": "Approve a staged memory and resolve temporal conflicts.",
             "inputSchema": {
@@ -217,6 +242,27 @@ def _mcp(root: Path) -> None:
                     },
                 },
                 "required": ["id"],
+            },
+        },
+        {
+            "name": "repo_publish_memory",
+            "description": "Publish a locally approved memory as a Git-versioned team memory file for review and commit.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"id": {"type": "string"}},
+                "required": ["id"],
+            },
+        },
+        {
+            "name": "repo_team_memory_search",
+            "description": "Search approved team memories checked out from Git; local/private staged memories are not included.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "limit": {"type": "integer", "default": 10},
+                },
+                "required": ["query"],
             },
         },
         {
@@ -242,7 +288,7 @@ def _mcp(root: Path) -> None:
                 result = {
                     "protocolVersion": params.get("protocolVersion", "2024-11-05"),
                     "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "agentramen", "version": "0.1.0"},
+                    "serverInfo": {"name": "agentramen", "version": __version__},
                 }
             elif method == "notifications/initialized":
                 continue
@@ -284,6 +330,19 @@ def _mcp(root: Path) -> None:
                     value = recent_changes(root, int(args.get("limit", 20)))
                 elif name == "repo_review_queue":
                     value = review_queue(root, int(args.get("limit", 50)))
+                elif name == "repo_stage_memory":
+                    value = {
+                        "id": stage_memory(
+                            root,
+                            str(args.get("subject", "")),
+                            str(args.get("content", "")),
+                            category=str(args.get("category", "context")),
+                            source=(str(args["source"]) if args.get("source") is not None else None),
+                            importance_score=float(args.get("importance_score", 0.5)),
+                        ),
+                        "status": "pending_review",
+                        "shared": False,
+                    }
                 elif name == "repo_approve_memory":
                     value = approve_memory(
                         root,
@@ -293,6 +352,12 @@ def _mcp(root: Path) -> None:
                 elif name == "repo_reject_memory":
                     value = reject_memory(
                         root, str(args.get("id", "")), str(args.get("note", ""))
+                    )
+                elif name == "repo_publish_memory":
+                    value = publish_shared_memory(root, str(args.get("id", "")))
+                elif name == "repo_team_memory_search":
+                    value = search_shared_memories(
+                        root, str(args.get("query", "")), int(args.get("limit", 10))
                     )
                 else:
                     raise AgentRamenError(f"Unknown MCP tool: {name}")
@@ -361,12 +426,91 @@ def main(argv: list[str] | None = None) -> int:
         "--semantic-mode", choices=("off", "on", "both"), default="off"
     )
     benchmark.add_argument("--json", action="store_true")
+    memory = subparsers.add_parser("memory", help="Review and share repository memories")
+    memory_actions = memory.add_subparsers(dest="memory_action", required=True)
+    publish = memory_actions.add_parser("publish", help="Publish an approved memory for team review")
+    publish.add_argument("memory_id")
+    publish.add_argument("--json", action="store_true")
+    memory_search = memory_actions.add_parser("search", help="Search Git-shared team memories")
+    memory_search.add_argument("query")
+    memory_search.add_argument("--limit", type=int, default=10)
+    memory_search.add_argument("--json", action="store_true")
+    snapshot = subparsers.add_parser("snapshot", help="Export a sanitized central-service snapshot")
+    snapshot_actions = snapshot.add_subparsers(dest="snapshot_action", required=True)
+    snapshot_export = snapshot_actions.add_parser("export", help="Export the current indexed Git revision")
+    snapshot_export.add_argument("--repository-id", required=True)
+    snapshot_export.add_argument("--output", type=Path, required=True)
+    snapshot_export.add_argument("--json", action="store_true")
+    remote = subparsers.add_parser("mcp-http", help="Serve a snapshot over authenticated Streamable HTTP")
+    remote.add_argument("--snapshot-archive", type=Path, required=True)
+    remote.add_argument("--repository-id", required=True)
+    remote.add_argument("--issuer", default=os.environ.get("AGENTRAMEN_OIDC_ISSUER"))
+    remote.add_argument("--jwks-url", default=os.environ.get("AGENTRAMEN_OIDC_JWKS_URL"))
+    remote.add_argument("--audience", default=os.environ.get("AGENTRAMEN_OIDC_AUDIENCE"))
+    remote.add_argument("--resource-url", default=os.environ.get("AGENTRAMEN_OIDC_RESOURCE_URL"))
+    remote.add_argument(
+        "--required-scope", default=os.environ.get("AGENTRAMEN_OIDC_REQUIRED_SCOPE", "agentramen:read")
+    )
+    remote.add_argument("--allowed-group", default=os.environ.get("AGENTRAMEN_OIDC_ALLOWED_GROUP"))
+    remote.add_argument(
+        "--group-claim", default=os.environ.get("AGENTRAMEN_OIDC_GROUP_CLAIM", "groups")
+    )
+    remote.add_argument(
+        "--allowed-host",
+        action="append",
+        default=[item for item in os.environ.get("AGENTRAMEN_MCP_ALLOWED_HOSTS", "").split(",") if item],
+    )
+    remote.add_argument(
+        "--allowed-origin",
+        action="append",
+        default=[item for item in os.environ.get("AGENTRAMEN_MCP_ALLOWED_ORIGINS", "").split(",") if item],
+    )
+    remote.add_argument("--host", default="127.0.0.1")
+    remote.add_argument("--port", type=int, default=8000)
     serve = subparsers.add_parser("serve", help="Start the local versioned HTTP API")
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8765)
     args = parser.parse_args(argv)
     try:
-        root = find_root()
+        root = None if args.command == "mcp-http" else find_root()
+        if args.command == "mcp-http":
+            required = {
+                "issuer": args.issuer,
+                "jwks URL": args.jwks_url,
+                "audience": args.audience,
+                "resource URL": args.resource_url,
+                "allowed host": args.allowed_host,
+            }
+            missing = [name for name, value in required.items() if not value]
+            if missing:
+                raise AgentRamenError(
+                    "mcp-http requires OIDC settings and an allowed Host: " + ", ".join(missing)
+                )
+            try:
+                from .remote_mcp import run_remote_server
+            except ImportError as exc:
+                raise AgentRamenError(
+                    "Central MCP requires the optional dependencies; install agentramen[central]."
+                ) from exc
+            with mounted_snapshot(args.snapshot_archive, args.repository_id) as (snapshot_root, manifest):
+                run_remote_server(
+                    snapshot_root,
+                    repository_id=args.repository_id,
+                    snapshot_commit=str(manifest["commit"]),
+                    issuer=args.issuer,
+                    jwks_url=args.jwks_url,
+                    audience=args.audience,
+                    resource_url=args.resource_url,
+                    allowed_hosts=args.allowed_host,
+                    required_scope=args.required_scope,
+                    allowed_group=args.allowed_group,
+                    group_claim=args.group_claim,
+                    allowed_origins=args.allowed_origin,
+                    host=args.host,
+                    port=args.port,
+                )
+            return 0
+        assert root is not None
         if args.command == "init":
             value = _init(root)
         elif args.command in ("index", "update"):
@@ -400,6 +544,13 @@ def main(argv: list[str] | None = None) -> int:
                 args.semantic_mode == "on",
             )
             value = run_comparisons(args.files, args.repository, modes)
+        elif args.command == "memory":
+            if args.memory_action == "publish":
+                value = publish_shared_memory(root, args.memory_id)
+            else:
+                value = search_shared_memories(root, args.query, args.limit)
+        elif args.command == "snapshot":
+            value = export_snapshot(root, args.repository_id, args.output)
         elif args.command == "serve":
             from .server import serve as serve_api
 

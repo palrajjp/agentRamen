@@ -23,6 +23,7 @@ DEFAULT_IGNORES = (
     ".agentramen.yml",
     ".agentramenignore",
     ".agentramen-action/",
+    ".agentramen-shared/",
     "node_modules/",
     "dist/",
     "build/",

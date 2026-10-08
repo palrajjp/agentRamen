@@ -1,16 +1,26 @@
+import asyncio
+import time
 import subprocess
 import json
 import sys
 import tempfile
 import threading
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 from pathlib import Path
 from urllib.request import Request, urlopen
 
 from agentramen.cli import _init
 from agentramen.indexer.noise_filter import filter_noise
-from agentramen.memory import approve_memory, reject_memory, review_queue, stage_memory
+from agentramen.memory import (
+    approve_memory,
+    publish_shared_memory,
+    reject_memory,
+    review_queue,
+    search_shared_memories,
+    stage_memory,
+)
 from agentramen.core import (
     architecture,
     connect,
@@ -115,6 +125,225 @@ class AgentRamenIndexTests(unittest.TestCase):
         self.assertEqual(nodes[1][0], "Use OAuthProvider")
         self.assertEqual(nodes[1][1], "VERIFIED")
         self.assertIsNone(nodes[1][2])
+
+    def test_shared_memories_publish_search_and_supersede(self):
+        (self.root / ".gitignore").write_text(".agentramen/\n", encoding="utf-8")
+        (self.root / "auth.py").write_text("class AuthService: pass\n", encoding="utf-8")
+        self.commit("add source file")
+        index_repository(self.root)
+
+        first = stage_memory(
+            self.root, "authentication provider", "Use AuthService", source="team note"
+        )
+        approve_memory(self.root, first)
+        published = publish_shared_memory(self.root, first)
+        self.assertEqual(published["status"], "published")
+        self.assertEqual(published["path"], f".agentramen-shared/memories/{first}.json")
+        self.assertEqual(publish_shared_memory(self.root, first)["status"], "already_published")
+        self.assertEqual(search_shared_memories(self.root, "authentication provider")[0]["id"], first)
+
+        second = stage_memory(
+            self.root, "authentication provider", "Use OAuthProvider", source="team note"
+        )
+        approve_memory(self.root, second)
+        updated = publish_shared_memory(self.root, second)
+
+        self.assertEqual(updated["superseded_ids"], [first])
+        first_file = self.root / ".agentramen-shared" / "memories" / f"{first}.json"
+        self.assertEqual(json.loads(first_file.read_text(encoding="utf-8"))["epistemic_status"], "SUPERSEDED")
+        results = search_shared_memories(self.root, "OAuth provider")
+        self.assertEqual([item["id"] for item in results], [second])
+        self.assertEqual(index_repository(self.root)["files"], 2)
+        graph_paths = {
+            node["path"] for node in graph_export(self.root)["nodes"] if node["type"] == "File"
+        }
+        self.assertEqual(graph_paths, {".gitignore", "auth.py"})
+        self.commit("share approved team memory")
+        with tempfile.TemporaryDirectory() as teammate_directory:
+            teammate_root = Path(teammate_directory) / "checkout"
+            subprocess.run(
+                ["git", "clone", "-q", str(self.root), str(teammate_root)],
+                check=True,
+            )
+            teammate_results = search_shared_memories(teammate_root, "OAuth provider")
+            self.assertEqual([item["id"] for item in teammate_results], [second])
+
+    def test_shared_memory_requires_approval_and_rejects_credentials(self):
+        pending = stage_memory(self.root, "deployment rule", "Use signed artifacts")
+        with self.assertRaisesRegex(AgentRamenError, "approved"):
+            publish_shared_memory(self.root, pending)
+
+        credential = stage_memory(
+            self.root, "deployment key", "api_key = 'Abcdefghijklmnop'"
+        )
+        approve_memory(self.root, credential)
+        with self.assertRaisesRegex(AgentRamenError, "credential-like"):
+            publish_shared_memory(self.root, credential)
+
+        source_credential = stage_memory(
+            self.root,
+            "deployment provenance",
+            "Use the approved deployment pipeline",
+            source="api_key = 'Abcdefghijklmnop'",
+        )
+        approve_memory(self.root, source_credential)
+        with self.assertRaisesRegex(AgentRamenError, "credential-like"):
+            publish_shared_memory(self.root, source_credential)
+
+    def test_central_snapshot_excludes_private_memory_and_includes_shared_memory(self):
+        from agentramen.snapshots import export_snapshot, mounted_snapshot
+
+        (self.root / ".gitignore").write_text(".agentramen/\n", encoding="utf-8")
+        (self.root / "auth.py").write_text("class AuthService: pass\n", encoding="utf-8")
+        (self.root / "credentials.py").write_text(
+            "api_key = 'ThisLooksLikeARealSecretValue'\n", encoding="utf-8"
+        )
+        self.commit("add auth and credential-like source")
+        index_repository(self.root)
+
+        private_id = stage_memory(self.root, "personal note", "Keep this local only")
+        approve_memory(self.root, private_id)
+        shared_id = stage_memory(
+            self.root, "authentication provider", "Use OAuthProvider", source="reviewed team note"
+        )
+        approve_memory(self.root, shared_id)
+        publish_shared_memory(self.root, shared_id)
+        self.commit("share reviewed authentication memory")
+        index_repository(self.root)
+        local_only_id = stage_memory(self.root, "developer note", "Do not share this")
+        approve_memory(self.root, local_only_id)
+
+        snapshot = self.root.with_name(self.root.name + "-snapshot.zip")
+        self.addCleanup(snapshot.unlink, missing_ok=True)
+        info = export_snapshot(self.root, "company/auth-service", snapshot)
+        self.assertEqual(info["indexed_files"], 2)
+        self.assertEqual(info["shared_memories"], 1)
+
+        with mounted_snapshot(snapshot, "company/auth-service") as (snapshot_root, manifest):
+            self.assertEqual(manifest["repository_id"], "company/auth-service")
+            self.assertFalse((snapshot_root / "credentials.py").exists())
+            self.assertEqual(search_shared_memories(snapshot_root, "OAuth provider")[0]["id"], shared_id)
+            conn = connect(snapshot_root)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM staged_memories").fetchone()[0], 0)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM memory_nodes").fetchone()[0], 0)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM context_exclusion_rules").fetchone()[0], 0)
+            conn.close()
+
+    def test_remote_mcp_is_read_only_and_requires_bearer_auth(self):
+        try:
+            import jwt
+            from agentramen.remote_mcp import OIDCVerifier, create_remote_server
+            from cryptography.hazmat.primitives.asymmetric import rsa
+            from mcp.server.transport_security import TransportSecuritySettings
+            from starlette.testclient import TestClient
+        except ImportError:
+            self.skipTest("Install agentramen[central] to test remote MCP")
+
+        (self.root / "auth.py").write_text("class AuthService: pass\n", encoding="utf-8")
+        self.commit("add auth service")
+        index_repository(self.root)
+        server = create_remote_server(
+            self.root,
+            repository_id="company/auth-service",
+            snapshot_commit=subprocess.check_output(
+                ["git", "-C", str(self.root), "rev-parse", "HEAD"], text=True
+            ).strip(),
+            issuer="https://issuer.example.com/tenant",
+            jwks_url="https://issuer.example.com/tenant/keys",
+            audience="agentramen-api",
+            resource_url="https://mcp.example.com/mcp",
+            allowed_hosts=["testserver"],
+            allowed_group="engineering",
+        )
+
+        tools = asyncio.run(server.list_tools())
+        names = {tool.name for tool in tools}
+        self.assertIn("repo_context", names)
+        self.assertIn("repo_team_memory_search", names)
+        self.assertNotIn("repo_publish_memory", names)
+        context_result = asyncio.run(
+            server.call_tool("repo_context", {"task": "AuthService", "token_budget": 500})
+        )
+        self.assertEqual(
+            context_result.structured_content["files"][0]["path"], "auth.py"
+        )
+
+        issuer = "https://issuer.example.com/tenant"
+        audience = "agentramen-api"
+        verifier = OIDCVerifier(
+            issuer=issuer,
+            jwks_url="https://issuer.example.com/tenant/keys",
+            audience=audience,
+            resource_url="https://mcp.example.com/mcp",
+            required_scope="agentramen:read",
+            allowed_group="engineering",
+        )
+        self.assertIsNone(asyncio.run(verifier.verify_token("not.a.jwt")))
+        signing_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        now = int(time.time())
+        access_jwt = jwt.encode(
+            {
+                "iss": issuer,
+                "aud": audience,
+                "sub": "developer-123",
+                "exp": now + 300,
+                "scope": "agentramen:read",
+                "groups": ["engineering"],
+            },
+            signing_key,
+            algorithm="RS256",
+            headers={"kid": "test-key"},
+        )
+        with patch.object(
+            verifier.jwks,
+            "get_signing_key_from_jwt",
+            return_value=SimpleNamespace(key=signing_key.public_key()),
+        ):
+            verified = asyncio.run(verifier.verify_token(access_jwt))
+        self.assertIsNotNone(verified)
+        self.assertEqual(verified.subject, "developer-123")
+
+        app = server.streamable_http_app(
+            transport_security=TransportSecuritySettings(allowed_hosts=["testserver"])
+        )
+        with TestClient(app) as client:
+            response = client.post(
+                "/mcp",
+                json={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+            )
+        self.assertEqual(response.status_code, 401)
+
+    def test_central_snapshot_round_trip_contains_only_indexed_safe_source(self):
+        from agentramen.snapshots import export_snapshot, mounted_snapshot
+
+        (self.root / ".gitignore").write_text(".agentramen/\n", encoding="utf-8")
+        (self.root / "auth.py").write_text(
+            "class AuthService:\n    pass\n", encoding="utf-8"
+        )
+        (self.root / "credentials.py").write_text(
+            "api_key = 'ThisLooksLikeARealSecretValue'\n", encoding="utf-8"
+        )
+        self.commit("add safe auth and excluded credential source")
+        index_repository(self.root)
+        snapshot = self.root.with_suffix(".snapshot.zip")
+        self.addCleanup(snapshot.unlink, missing_ok=True)
+
+        result = export_snapshot(self.root, "palrajjp/test-repo", snapshot)
+        self.assertEqual(result["indexed_files"], 2)
+        expected_head = subprocess.check_output(
+            ["git", "-C", str(self.root), "rev-parse", "HEAD"], text=True
+        ).strip()
+
+        with mounted_snapshot(snapshot, "palrajjp/test-repo") as (snapshot_root, manifest):
+            self.assertEqual(manifest["commit"], expected_head)
+            self.assertFalse((snapshot_root / "credentials.py").exists())
+            context = context_for(snapshot_root, "AuthService", 1000)
+            self.assertEqual(context["files"][0]["path"], "auth.py")
+            self.assertNotIn("ThisLooksLikeARealSecretValue", json.dumps(context))
+
+        with self.assertRaisesRegex(AgentRamenError, "does not match"):
+            with mounted_snapshot(snapshot, "other/repo"):
+                pass
 
     def test_noise_filter_removes_boilerplate_and_keeps_structure(self):
         filtered = filter_noise(
@@ -558,7 +787,7 @@ class AgentRamenIndexTests(unittest.TestCase):
         self.assertIn("commits: 100", config)
         self.assertIn("uses: palrajjp/agentRamen/.github/workflows/index.yml@main", workflow)
 
-    def test_mcp_exposes_context_tool(self):
+    def test_mcp_exposes_context_and_team_memory_workflow(self):
         (self.root / ".agentramen.yml").write_text(
             "context:\n  default_budget: 350\n", encoding="utf-8"
         )
@@ -573,6 +802,25 @@ class AgentRamenIndexTests(unittest.TestCase):
                 "id": 3,
                 "method": "tools/call",
                 "params": {"name": "repo_context", "arguments": {"task": "AuthService"}},
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "tools/call",
+                "params": {
+                    "name": "repo_stage_memory",
+                    "arguments": {
+                        "subject": "authentication provider",
+                        "content": "Use OAuthProvider",
+                        "source": "team review",
+                    },
+                },
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 5,
+                "method": "tools/call",
+                "params": {"name": "repo_review_queue", "arguments": {}},
             },
         ]
         import_code = (
@@ -590,14 +838,62 @@ class AgentRamenIndexTests(unittest.TestCase):
             check=True,
         )
         results = [json.loads(line) for line in response.stdout.splitlines()]
-        tools = [tool["name"] for tool in results[-2]["result"]["tools"]]
+        results_by_id = {result.get("id"): result for result in results}
+        tools = [tool["name"] for tool in results_by_id[2]["result"]["tools"]]
         self.assertIn("repo_context", tools)
         self.assertIn("repo_graph", tools)
         self.assertIn("repo_review_queue", tools)
+        self.assertIn("repo_stage_memory", tools)
         self.assertIn("repo_approve_memory", tools)
         self.assertIn("repo_reject_memory", tools)
-        context = results[-1]["result"]["structuredContent"]
+        self.assertIn("repo_publish_memory", tools)
+        self.assertIn("repo_team_memory_search", tools)
+        context = results_by_id[3]["result"]["structuredContent"]
         self.assertEqual(context["token_budget"], 350)
+        staged = results_by_id[4]["result"]["structuredContent"]
+        memory_id = staged["id"]
+        self.assertEqual(staged["shared"], False)
+        self.assertEqual(results_by_id[5]["result"]["structuredContent"][0]["id"], memory_id)
+
+        publish_requests = [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {"name": "repo_approve_memory", "arguments": {"id": memory_id}},
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {"name": "repo_publish_memory", "arguments": {"id": memory_id}},
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "tools/call",
+                "params": {
+                    "name": "repo_team_memory_search",
+                    "arguments": {"query": "OAuthProvider"},
+                },
+            },
+        ]
+        publish_response = subprocess.run(
+            [sys.executable, "-c", import_code],
+            cwd=self.root,
+            input="".join(json.dumps(item) + "\n" for item in publish_requests),
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        published = {
+            result.get("id"): result
+            for result in map(json.loads, publish_response.stdout.splitlines())
+        }
+        self.assertEqual(published[2]["result"]["structuredContent"]["status"], "approved")
+        self.assertEqual(published[3]["result"]["structuredContent"]["status"], "published")
+        self.assertEqual(published[4]["result"]["structuredContent"][0]["id"], memory_id)
 
     def test_graph_tracks_imports_calls_and_history(self):
         (self.root / "auth.py").write_text(

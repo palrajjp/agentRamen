@@ -4,14 +4,11 @@
 
 [![CI](https://github.com/palrajjp/agentRamen/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/palrajjp/agentRamen/actions/workflows/tests.yml)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-3776AB.svg)](https://www.python.org/)
+[![PyPI](https://img.shields.io/pypi/v/agentramen)](https://pypi.org/project/agentramen/)
 [![Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-4C8BF5.svg)](LICENSE)
 [![GitHub stars](https://img.shields.io/github/stars/palrajjp/agentRamen?style=social)](https://github.com/palrajjp/agentRamen/stargazers)
 
-**A local map of your codebase, ready for the next coding task.**
-
-*Persistent memory for your Git repo and AI coding agents.*
-
-agentRamen indexes source structure and Git history into a local SQLite graph, then retrieves the files and excerpts most relevant to a task. Use it from the CLI, an MCP-compatible coding agent, or its local HTTP interface. No hosted service, API key, or runtime dependency is required by default.
+agentRamen indexes source structure and Git history, then retrieves task-relevant files and excerpts. It is local-first by default: each developer keeps a private SQLite index. Teams can optionally publish sanitized, commit-pinned snapshots to a centrally hosted, OIDC-protected read-only MCP service.
 
 ## Quick start
 
@@ -36,8 +33,8 @@ A minimal [VS Code extension](vscode-extension/README.md) is also available.
 - **Find task context:** rank files using paths, symbols, imports, Git history, and optional local semantic similarity.
 - **Explain change impact:** inspect dependencies, dependents, co-changes, hotspots, and file history.
 - **Map repository structure:** explore architecture, export the graph, and query cached commit snapshots.
-- **Connect to coding agents:** expose repository tools over MCP stdio, or use the local HTTP API and browser UI.
-- **Keep data local:** index and optional embeddings stay in the repository's local database; source excerpts are read on demand.
+- **Connect to coding agents:** use local MCP stdio, the browser UI, or an optional authenticated centralized MCP service.
+- **Keep local indexes private:** in local mode, the database and optional embeddings stay in each checkout; central mode transfers only an explicit sanitized snapshot to infrastructure you operate.
 
 ## How it works
 
@@ -54,50 +51,28 @@ flowchart LR
 
 The default install uses the Python standard library and conservative analysis for other languages. Optional extras add Tree-sitter parsing, local semantic retrieval, and model-aware token counting.
 
-## Install options
-
-To install from a local checkout instead:
+## Optional extras
 
 ```bash
-git clone https://github.com/palrajjp/agentRamen.git
-cd agentRamen
-python -m pip install .
+python -m pip install 'agentramen[treesitter]'
+python -m pip install 'agentramen[semantic]'
+python -m pip install 'agentramen[tokenizer]'
+python -m pip install 'agentramen[central]'
 ```
 
-Optional extras enable structured parsing for additional languages and local semantic retrieval:
+The default install has no runtime dependencies. Tree-sitter, semantic embeddings, tokenizers, and the remote MCP service are opt-in. Semantic model setup may download weights on first use; inference runs locally.
 
-agentRamen's default installation runs locally with no runtime dependencies. Python files use the standard-library AST; other supported extensions use conservative regex analysis unless the optional Tree-sitter extra is installed. Source excerpts are read on demand for context. When semantic retrieval is enabled, locally generated embeddings are also stored in `.agentramen/graph.db`; source and embeddings are not sent to a agentRamen service.
+`agentramen init` creates `.agentramen.yml` and a GitHub Actions caller workflow if they do not exist, then creates/updates `.agentramen/graph.db`. `agentramen update` and `agentramen index` incrementally refresh changed files. The database is ignored by Git.
 
-## Install
-
-Requires Python 3.10+ and Git.
-
-```bash
-python -m pip install agentramen
-cd /path/to/a/git/repository
-agentramen init
-agentramen context "Add authentication"
-```
+In local mode, source excerpts and optional embeddings stay in `.agentramen/graph.db`. Central snapshot mode transfers indexed source that passes credential heuristics to your private central service; review your organization's data-handling requirements before enabling it.
 
 ## Publishing releases
 
 Configure a PyPI trusted publisher for `palrajjp/agentRamen`, using the
 `.github/workflows/publish.yml` workflow and the `pypi` environment. To publish
-a release, update the version in `pyproject.toml`, create a matching `v`-prefixed
-Git tag, and publish a GitHub release for that tag. The workflow builds the
-distributions and publishes them to PyPI using OIDC trusted publishing.
-
-Optional extras enable structured parsing for additional languages and local semantic retrieval:
-
-```bash
-python -m pip install '.[treesitter]'
-python -m pip install '.[semantic]'
-python -m pip install '.[tokenizer]'
-```
-
-Semantic retrieval uses FastEmbed and may download/initialize its configured model on first use; embedding inference runs locally.
-
-`agentramen init` creates `.agentramen.yml` and a GitHub Actions caller workflow if they do not exist, then creates/updates `.agentramen/graph.db`. `agentramen update` and `agentramen index` incrementally refresh changed files. The database is ignored by Git.
+a release, update the version in `pyproject.toml` and `agentramen/__init__.py`,
+create a matching `v`-prefixed Git tag, and publish a GitHub release for that
+tag. The workflow builds the distributions and publishes them to PyPI using OIDC.
 
 ### Configuration
 
@@ -264,7 +239,7 @@ Custom GPTs cannot start a developer's local stdio process. A GPT Action or host
 
 ## MCP
 
-Run `agentramen mcp` from a repository and configure your MCP-compatible agent to launch that command in the repository working directory. Tools include `repo_context`, `repo_status`, `repo_history`, `repo_search`, `repo_explain`, `repo_impact`, `repo_dependencies`, `repo_tests`, `repo_changes`, `repo_architecture`, `repo_hotspots`, and `repo_graph`. The stdio server needs no API keys and does not access a network service.
+Run `agentramen mcp` from a repository and configure your MCP-compatible agent to launch that command in the repository working directory. Tools include `repo_context`, `repo_status`, `repo_history`, `repo_search`, `repo_explain`, `repo_impact`, `repo_dependencies`, `repo_tests`, `repo_changes`, `repo_architecture`, `repo_hotspots`, `repo_graph`, `repo_stage_memory`, `repo_review_queue`, `repo_approve_memory`, `repo_reject_memory`, `repo_publish_memory`, and `repo_team_memory_search`. The stdio server needs no API keys and does not access a network service.
 
 ## Local HTTP API
 
@@ -281,6 +256,57 @@ The index stays in `.agentramen/graph.db` on the local machine or in the configu
 ## Retrieval and memory
 
 Context retrieval uses an incremental SQLite inverted index for lexical candidates, then fuses lexical, optional semantic, and graph/history rankings with reciprocal-rank fusion before applying the token budget. Reviewed memory can be staged, approved, or rejected; approving a new fact supersedes conflicting active facts with the same subject.
+
+### Share approved memories with a team
+
+AgentRamen keeps the live SQLite database private to each checkout. To share a reviewed fact, stage it, approve it, then publish it to `.agentramen-shared/memories/<id>.json`. Commit that file in a pull request so teammates can review changes, see history, and receive the update through Git. One file per memory keeps unrelated additions from colliding.
+
+MCP tools: `repo_stage_memory` creates a private pending proposal, `repo_review_queue` lists proposals, `repo_approve_memory` records human approval, and `repo_publish_memory` writes the Git-shareable file. `repo_team_memory_search` searches approved shared files after checkout or pull. Superseded facts are marked in their existing file when a newer approved fact with the same subject is published. Credential-like content is blocked from publication; still review memory content for confidential or personal data before committing. Agents should never approve or publish a memory without explicit human direction.
+
+CLI search and publish:
+
+```bash
+agentramen memory search "authentication provider"
+agentramen memory publish <approved-memory-id>
+```
+
+Shared memory is opt-in and version-controlled; rejected or merely staged notes stay local. Do not sync SQLite over a network share. For 100-person teams, use protected branches and normal pull-request review for shared-memory changes.
+
+## Centralized MCP for a shared graph
+
+Local stdio remains the default. To publish an immutable graph snapshot for remote agents, enable the optional central dependencies and the reusable workflow input:
+
+```yaml
+jobs:
+  index:
+    uses: palrajjp/agentRamen/.github/workflows/index.yml@main
+    with:
+      central_snapshot: true
+      repository_id: acme/payments-monorepo
+```
+
+The workflow uploads `agentramen-snapshot-${{ github.sha }}`. It contains the pinned graph, hash-verified indexed source that passed credential filtering, and committed team memories. Developer-private SQLite memories and local exclusion rules are stripped. Artifacts expire after 14 days, so copy accepted snapshots to private durable company storage before expiry.
+
+Deploy one read-only MCP service per repository snapshot. It validates company OIDC JWTs against JWKS, issuer, audience, expiry, scope, and optionally group claims; DNS-rebinding protection requires an explicit Host allowlist. Terminate TLS at a trusted ingress and keep the archive and mounted snapshot inside company-controlled infrastructure.
+
+```bash
+python -m pip install 'agentramen[central]'
+export AGENTRAMEN_OIDC_ISSUER="https://login.example.com/tenant/v2.0"
+export AGENTRAMEN_OIDC_JWKS_URL="https://login.example.com/tenant/discovery/v2.0/keys"
+export AGENTRAMEN_OIDC_AUDIENCE="agentramen-api"
+export AGENTRAMEN_OIDC_RESOURCE_URL="https://agentramen.example.com/mcp"
+export AGENTRAMEN_OIDC_REQUIRED_SCOPE="agentramen:read"
+export AGENTRAMEN_OIDC_ALLOWED_GROUP="engineering"
+export AGENTRAMEN_MCP_ALLOWED_HOSTS="agentramen.example.com"
+agentramen mcp-http \
+  --snapshot-archive /srv/agentramen/current-snapshot.zip \
+  --repository-id acme/payments-monorepo \
+  --host 0.0.0.0 --port 8000
+```
+
+Configure MCP clients to use the HTTPS `/mcp` endpoint and complete the company OAuth/OIDC flow. For example, Claude Code can add it with `claude mcp add --transport http agentramen-central https://agentramen.example.com/mcp`; VS Code supports remote HTTP MCP servers. Set `AGENTRAMEN_OIDC_GROUP_CLAIM` when your IdP uses a different group claim (default `groups`).
+
+Remote tools are read-only: status, context, search, architecture, graph, and approved team-memory search. Roll the service when CI publishes a new snapshot. `agentramen mcp-http` currently runs one process; larger deployments should place it behind a process manager/load balancer and provide an atomically updated snapshot mount. This is a deployment building block, not a cloud-specific object-store uploader or multi-tenant SaaS control plane. Snapshot source is still company code; heuristic secret filtering is not a replacement for ACLs and data-loss review.
 
 ## Known limitations
 

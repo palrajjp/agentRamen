@@ -1,0 +1,46 @@
+name: GitGraph reusable index
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  index:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/checkout@v4
+        with:
+          repository: palrajjp/gitGraph
+          ref: main
+          path: .gitgraph-action
+          token: ${{ github.token }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/cache@v4
+        with:
+          path: .gitgraph
+          key: gitgraph-${{ runner.os }}-${{ github.ref }}-${{ github.sha }}
+          restore-keys: |
+            gitgraph-${{ runner.os }}-${{ github.ref }}-
+            gitgraph-${{ runner.os }}-
+      - name: Build repository graph
+        run: |
+          python -m pip install ./.gitgraph-action
+          python -m unittest discover -s .gitgraph-action/tests -v
+          gitgraph index --json
+      - name: Summarize pull request context
+        if: github.event_name == 'pull_request'
+        run: gitgraph pr --base "${{ github.event.pull_request.base.sha }}" --json | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gitgraph-${{ github.sha }}
+          path: .gitgraph/graph.db
+          if-no-files-found: error
+          retention-days: 14

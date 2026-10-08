@@ -329,6 +329,9 @@ def connect(root: Path) -> sqlite3.Connection:
             ON graph_edges(target, type, source);
         """
     )
+    from .models.schema_patches import apply_schema_patches
+
+    apply_schema_patches(conn)
     file_columns = {row[1] for row in conn.execute("PRAGMA table_info(files)")}
     if "calls" not in file_columns:
         conn.execute("ALTER TABLE files ADD COLUMN calls TEXT NOT NULL DEFAULT '[]'")
@@ -791,6 +794,11 @@ def _sync_file_embeddings(root: Path, conn: sqlite3.Connection, model_name: str)
         source = data.decode("utf-8", errors="replace")
         if any(SECRET_LINE.search(line) for line in source.splitlines()):
             continue
+        from .indexer.noise_filter import filter_noise
+
+        source = filter_noise(path, source)
+        if not source:
+            continue
         description = "passage: " + " ".join(
             [path, *json.loads(symbols), *json.loads(imports), source[:12_000]]
         )
@@ -1051,7 +1059,7 @@ def _count_context_tokens(value: object, tokenizer_model: str) -> int:
     return len(encoding.encode(serialized))
 
 
-def context_for(
+def _context_for_baseline(
     root: Path, task: str, budget: int | None = None
 ) -> dict[str, object]:
     config = load_config(root)
@@ -1310,6 +1318,12 @@ def context_for(
         "files_avoided": max(0, total_files - len(selected)),
         "confidence": "high" if len(selected) >= 3 else "medium" if selected else "low",
     }
+
+
+def context_for(root: Path, task: str, budget: int | None = None) -> dict[str, object]:
+    from .retriever.context import context_for as retrieve_context
+
+    return retrieve_context(root, task, budget)
 
 
 def repo_search(root: Path, query: str, limit: int = 20) -> list[dict[str, object]]:

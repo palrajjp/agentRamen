@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import fnmatch
 import hashlib
+import importlib.util
 import json
 import os
 import posixpath
@@ -58,9 +59,17 @@ LANGUAGES = {
     ".php": "php", ".py": "python", ".rb": "ruby", ".rs": "rust",
     ".swift": "swift", ".ts": "typescript", ".tsx": "typescript",
 }
-INDEX_VERSION = "3"
+try:
+    _TREE_SITTER_AVAILABLE = importlib.util.find_spec("tree_sitter_language_pack") is not None
+except ValueError:
+    _TREE_SITTER_AVAILABLE = False
+INDEX_VERSION = "5-treesitter" if _TREE_SITTER_AVAILABLE else "5-regex"
 DEFAULT_CONTEXT_BUDGET = 2000
 DEFAULT_HISTORY_COMMITS = 100
+DEFAULT_EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
+DEFAULT_TOKENIZER_MODEL = ""
+_EMBEDDING_MODELS: dict[str, object] = {}
+_TOKENIZERS: dict[str, object] = {}
 
 
 class GitGraphError(RuntimeError):
@@ -74,6 +83,9 @@ class RepositoryConfig:
     co_changes_enabled: bool = True
     history_commits: int = DEFAULT_HISTORY_COMMITS
     default_budget: int = DEFAULT_CONTEXT_BUDGET
+    semantic_enabled: bool = False
+    embedding_model: str = DEFAULT_EMBEDDING_MODEL
+    tokenizer_model: str = DEFAULT_TOKENIZER_MODEL
     ignore: tuple[str, ...] = ()
 
 
@@ -136,6 +148,7 @@ def load_config(root: Path) -> RepositoryConfig:
     git_options = mapping(document, "git")
     history = mapping(document, "history")
     context = mapping(document, "context")
+    semantic = mapping(document, "semantic")
     ignore = document.get("ignore", [])
     if not isinstance(ignore, list) or any(not isinstance(item, str) for item in ignore):
         raise GitGraphError("Configuration 'ignore' must be a list of patterns.")
@@ -145,10 +158,14 @@ def load_config(root: Path) -> RepositoryConfig:
     co_changes_enabled = git_options.get("co_changes", True)
     history_commits = history.get("commits", DEFAULT_HISTORY_COMMITS)
     default_budget = context.get("default_budget", DEFAULT_CONTEXT_BUDGET)
+    tokenizer_model = context.get("tokenizer_model", DEFAULT_TOKENIZER_MODEL)
+    semantic_enabled = semantic.get("enabled", False)
+    embedding_model = semantic.get("model", DEFAULT_EMBEDDING_MODEL)
     for name, value in (
         ("indexing.incremental", incremental),
         ("git.history", history_enabled),
         ("git.co_changes", co_changes_enabled),
+        ("semantic.enabled", semantic_enabled),
     ):
         if not isinstance(value, bool):
             raise GitGraphError(f"Configuration '{name}' must be true or false.")
@@ -160,12 +177,19 @@ def load_config(root: Path) -> RepositoryConfig:
             raise GitGraphError(
                 f"Configuration '{name}' must be an integer from {minimum} to {maximum}."
             )
+    if not isinstance(embedding_model, str) or not embedding_model.strip():
+        raise GitGraphError("Configuration 'semantic.model' must be a non-empty string.")
+    if not isinstance(tokenizer_model, str):
+        raise GitGraphError("Configuration 'context.tokenizer_model' must be a string.")
     return RepositoryConfig(
         incremental=incremental,
         history_enabled=history_enabled,
         co_changes_enabled=co_changes_enabled,
         history_commits=history_commits,
         default_budget=default_budget,
+        semantic_enabled=semantic_enabled,
+        embedding_model=embedding_model,
+        tokenizer_model=tokenizer_model.strip(),
         ignore=tuple(ignore),
     )
 
@@ -270,7 +294,39 @@ def connect(root: Path) -> sqlite3.Connection:
             import_name TEXT NOT NULL,
             PRIMARY KEY(importer, import_name)
         );
+        CREATE TABLE IF NOT EXISTS file_search_terms (
+            path TEXT NOT NULL,
+            term TEXT NOT NULL,
+            path_term INTEGER NOT NULL,
+            PRIMARY KEY(path, term)
+        );
+        CREATE TABLE IF NOT EXISTS term_document_frequency (
+            term TEXT PRIMARY KEY,
+            document_frequency INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS file_embeddings (
+            path TEXT NOT NULL,
+            digest TEXT NOT NULL,
+            model TEXT NOT NULL,
+            vector TEXT NOT NULL,
+            PRIMARY KEY(path, model)
+        );
+        CREATE TABLE IF NOT EXISTS graph_snapshots (
+            revision TEXT PRIMARY KEY,
+            config_hash TEXT NOT NULL,
+            graph_json TEXT NOT NULL
+        );
         CREATE INDEX IF NOT EXISTS file_imports_by_name ON file_imports(import_name);
+        CREATE INDEX IF NOT EXISTS file_search_terms_by_term
+            ON file_search_terms(term, path);
+        CREATE INDEX IF NOT EXISTS file_search_terms_by_path_term
+            ON file_search_terms(path_term, term);
+        CREATE INDEX IF NOT EXISTS commit_files_by_path
+            ON commit_files(path, commit_hash);
+        CREATE INDEX IF NOT EXISTS graph_edges_by_source_type
+            ON graph_edges(source, type, target);
+        CREATE INDEX IF NOT EXISTS graph_edges_by_target_type
+            ON graph_edges(target, type, source);
         """
     )
     file_columns = {row[1] for row in conn.execute("PRAGMA table_info(files)")}
@@ -691,6 +747,67 @@ def _sync_cochanges(conn: sqlite3.Connection, enabled: bool, history_commits: in
         )
 
 
+def _embedding_model(model_name: str):
+    if model_name not in _EMBEDDING_MODELS:
+        try:
+            from fastembed import TextEmbedding
+        except ImportError as exc:
+            raise GitGraphError(
+                "Semantic search requires the optional dependency; install gitgraph[semantic]."
+            ) from exc
+        try:
+            _EMBEDDING_MODELS[model_name] = TextEmbedding(model_name=model_name)
+        except (OSError, ValueError, RuntimeError) as exc:
+            raise GitGraphError(f"Could not load embedding model '{model_name}': {exc}") from exc
+    return _EMBEDDING_MODELS[model_name]
+
+
+def _embed_texts(model_name: str, texts: list[str]) -> list[list[float]]:
+    if not texts:
+        return []
+    model = _embedding_model(model_name)
+    try:
+        return [vector.tolist() for vector in model.embed(texts)]
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise GitGraphError(f"Could not generate semantic embeddings: {exc}") from exc
+
+
+def _sync_file_embeddings(root: Path, conn: sqlite3.Connection, model_name: str) -> None:
+    rows = conn.execute(
+        "SELECT f.path, f.digest, f.symbols, f.imports "
+        "FROM files f LEFT JOIN file_embeddings e "
+        "ON e.path=f.path AND e.model=? AND e.digest=f.digest "
+        "WHERE e.path IS NULL ORDER BY f.path",
+        (model_name,),
+    ).fetchall()
+    pending: list[tuple[str, str, str]] = []
+    for path, digest, symbols, imports in rows:
+        try:
+            data = (root / path).read_bytes()
+        except OSError:
+            continue
+        if hashlib.sha256(data).hexdigest() != digest or b"\0" in data:
+            continue
+        source = data.decode("utf-8", errors="replace")
+        if any(SECRET_LINE.search(line) for line in source.splitlines()):
+            continue
+        description = "passage: " + " ".join(
+            [path, *json.loads(symbols), *json.loads(imports), source[:12_000]]
+        )
+        pending.append((path, digest, description))
+    vectors = _embed_texts(model_name, [item[2] for item in pending])
+    with conn:
+        for (path, digest, _), vector in zip(pending, vectors):
+            conn.execute(
+                "INSERT OR REPLACE INTO file_embeddings(path, digest, model, vector) "
+                "VALUES (?, ?, ?, ?)",
+                (path, digest, model_name, json.dumps(vector)),
+            )
+        conn.execute(
+            "DELETE FROM file_embeddings WHERE path NOT IN (SELECT path FROM files)"
+        )
+
+
 def index_repository(root: Path) -> dict[str, int]:
     root = root.resolve()
     config = load_config(root)
@@ -794,12 +911,15 @@ def index_repository(root: Path) -> dict[str, int]:
             changed_graph_paths.add(path)
             updated += 1
         _sync_graph(conn, changed_graph_paths)
+        _sync_search_terms(conn, changed_graph_paths)
         _sync_cochanges(conn, config.co_changes_enabled, config.history_commits)
         conn.execute(
             "INSERT INTO metadata(key, value) VALUES('index_version', ?) "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             (INDEX_VERSION,),
         )
+    if config.semantic_enabled:
+        _sync_file_embeddings(root, conn, config.embedding_model)
     file_count = conn.execute("SELECT COUNT(*) FROM files").fetchone()[0]
     conn.close()
     return {"indexed": updated, "removed": removed, "files": file_count}
@@ -862,57 +982,233 @@ def _terms(text: str) -> set[str]:
     return terms
 
 
+def _sync_search_terms(conn: sqlite3.Connection, changed_paths: set[str]) -> None:
+    affected_path_terms: set[str] = set()
+    for path in changed_paths:
+        affected_path_terms.update(
+            row[0] for row in conn.execute(
+                "SELECT term FROM file_search_terms WHERE path=? AND path_term=1", (path,)
+            )
+        )
+        conn.execute("DELETE FROM file_search_terms WHERE path=?", (path,))
+        row = conn.execute(
+            "SELECT symbols, imports FROM files WHERE path=?", (path,)
+        ).fetchone()
+        if row is None:
+            continue
+        path_terms = _terms(path.replace("/", " "))
+        indexed_terms = path_terms | _terms(
+            " ".join(json.loads(row[0]) + json.loads(row[1]))
+        )
+        conn.executemany(
+            "INSERT INTO file_search_terms(path, term, path_term) VALUES (?, ?, ?)",
+            [(path, term, int(term in path_terms)) for term in sorted(indexed_terms)],
+        )
+        affected_path_terms.update(path_terms)
+    for term in affected_path_terms:
+        frequency = conn.execute(
+            "SELECT COUNT(*) FROM file_search_terms WHERE term=? AND path_term=1",
+            (term,),
+        ).fetchone()[0]
+        if frequency:
+            conn.execute(
+                "INSERT INTO term_document_frequency(term, document_frequency) VALUES (?, ?) "
+                "ON CONFLICT(term) DO UPDATE SET document_frequency=excluded.document_frequency",
+                (term, frequency),
+            )
+        else:
+            conn.execute("DELETE FROM term_document_frequency WHERE term=?", (term,))
+
+
+def _batches(values: set[str] | list[str], batch_size: int = 900):
+    ordered = sorted(values)
+    for offset in range(0, len(ordered), batch_size):
+        yield ordered[offset : offset + batch_size]
+
+
+def _count_context_tokens(value: object, tokenizer_model: str) -> int:
+    serialized = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    if not tokenizer_model:
+        return (len(serialized) + 3) // 4
+    if tokenizer_model not in _TOKENIZERS:
+        try:
+            import tiktoken
+        except ImportError as exc:
+            raise GitGraphError(
+                "Tokenizer counting requires the optional dependency; install gitgraph[tokenizer]."
+            ) from exc
+        try:
+            _TOKENIZERS[tokenizer_model] = tiktoken.encoding_for_model(tokenizer_model)
+        except KeyError as exc:
+            raise GitGraphError(
+                f"No tokenizer encoding is known for model '{tokenizer_model}'."
+            ) from exc
+        except Exception as exc:
+            raise GitGraphError(
+                f"Could not initialize tokenizer for model '{tokenizer_model}': {exc}"
+            ) from exc
+    encoding = _TOKENIZERS[tokenizer_model]
+    return len(encoding.encode(serialized))
+
+
 def context_for(
     root: Path, task: str, budget: int | None = None
 ) -> dict[str, object]:
+    config = load_config(root)
     if budget is None:
-        budget = load_config(root).default_budget
+        budget = config.default_budget
     if budget < 100:
         raise GitGraphError("Token budget must be at least 100.")
-    conn = connect(root)
-    rows = conn.execute(
-        "SELECT path, language, bytes, symbols, imports, digest FROM files"
-    ).fetchall()
-    history = conn.execute(
-        "SELECT cf.path, c.subject, c.hash FROM commit_files cf "
-        "JOIN commits c ON c.hash=cf.commit_hash ORDER BY c.committed_at DESC"
-    ).fetchall()
-    conn.close()
     task_terms = _terms(task)
-    frequencies = Counter(term for path, *_ in rows for term in _terms(path.replace("/", " ")))
-    digest_by_path = {row[0]: row[5] for row in rows}
-    history_by_path: dict[str, list[tuple[str, str]]] = {}
-    for path, subject, commit_hash in history:
-        history_by_path.setdefault(path, []).append((subject, commit_hash))
     conn = connect(root)
-    edge_rows = conn.execute(
-        "SELECT source, target, type, weight FROM graph_edges "
-        "WHERE type IN ('DEPENDS_ON', 'CO_CHANGED_WITH')"
-    ).fetchall()
+    overlap_by_path: dict[str, set[str]] = {}
+    frequencies: dict[str, int] = {}
+    for batch in _batches(task_terms):
+        if not batch:
+            continue
+        placeholders = ",".join("?" for _ in batch)
+        for path, term in conn.execute(
+            f"SELECT path, term FROM file_search_terms WHERE term IN ({placeholders})",
+            batch,
+        ):
+            overlap_by_path.setdefault(path, set()).add(term)
+        frequencies.update(
+            conn.execute(
+                f"SELECT term, document_frequency FROM term_document_frequency "
+                f"WHERE term IN ({placeholders})",
+                batch,
+            ).fetchall()
+        )
+    embeddings = []
+    if config.semantic_enabled:
+        embeddings = conn.execute(
+            "SELECT e.path, e.vector FROM file_embeddings e "
+            "JOIN files f ON f.path=e.path AND f.digest=e.digest "
+            "WHERE e.model=?",
+            (config.embedding_model,),
+        ).fetchall()
+    semantic_scores: dict[str, float] = {}
+    if config.semantic_enabled and task.strip() and embeddings:
+        query_vector = _embed_texts(config.embedding_model, ["query: " + task])[0]
+        for path, raw_vector in embeddings:
+            vector = json.loads(raw_vector)
+            denominator = sum(value * value for value in query_vector) ** 0.5 * sum(
+                value * value for value in vector
+            ) ** 0.5
+            if denominator:
+                semantic_scores[path] = sum(
+                    left * right for left, right in zip(query_vector, vector)
+                ) / denominator
+    lexical_matches = set(overlap_by_path)
+    candidate_paths = lexical_matches | {
+        path for path, similarity in semantic_scores.items() if similarity >= 0.35
+    }
+    metadata_rows = []
+    for batch in _batches(candidate_paths):
+        if not batch:
+            continue
+        placeholders = ",".join("?" for _ in batch)
+        metadata_rows.extend(
+            conn.execute(
+                f"SELECT path, language, bytes, symbols, imports, digest FROM files "
+                f"WHERE path IN ({placeholders})",
+                batch,
+            ).fetchall()
+        )
+    metadata_by_path = {
+        path: (language, size, json.loads(raw_symbols), json.loads(raw_imports))
+        for path, language, size, raw_symbols, raw_imports, _digest in metadata_rows
+    }
+    digest_by_path = {row[0]: row[5] for row in metadata_rows}
+
+    history: dict[str, list[tuple[str, str]]] = {}
+
+    def fetch_history(paths: set[str]) -> None:
+        for batch in _batches(paths):
+            if not batch:
+                continue
+            placeholders = ",".join("?" for _ in batch)
+            history_rows = conn.execute(
+                f"SELECT cf.path, c.subject, c.hash FROM commit_files cf "
+                f"JOIN commits c ON c.hash=cf.commit_hash "
+                f"WHERE cf.path IN ({placeholders}) ORDER BY c.committed_at DESC",
+                batch,
+            ).fetchall()
+            for path, subject, commit_hash in history_rows:
+                history.setdefault(path, []).append((subject, commit_hash))
+
+    fetch_history(candidate_paths)
+
+    relation_rows: dict[tuple[str, str, str], tuple[str, str, str, float]] = {}
+
+    def fetch_edges(paths: set[str], column: str) -> None:
+        for batch in _batches(paths):
+            if not batch:
+                continue
+            placeholders = ",".join("?" for _ in batch)
+            for row in conn.execute(
+                f"SELECT source, target, type, weight FROM graph_edges "
+                f"WHERE type IN ('DEPENDS_ON', 'CO_CHANGED_WITH') "
+                f"AND {column} IN ({placeholders})",
+                [*(f"file:{path}" for path in batch)],
+            ):
+                relation_rows[(row[0], row[1], row[2])] = row
+
+    fetch_edges(candidate_paths, "source")
+    fetch_edges(lexical_matches, "target")
+    related_source_paths = {
+        source.removeprefix("file:")
+        for source, _target, _kind in relation_rows
+        if source.removeprefix("file:") not in candidate_paths
+    }
+    fetch_edges(related_source_paths, "source")
+    fetch_history(related_source_paths)
+    for batch in _batches(related_source_paths - set(metadata_by_path)):
+        if not batch:
+            continue
+        placeholders = ",".join("?" for _ in batch)
+        metadata_rows.extend(
+            conn.execute(
+                f"SELECT path, language, bytes, symbols, imports, digest FROM files "
+                f"WHERE path IN ({placeholders})",
+                batch,
+            ).fetchall()
+        )
+    metadata_by_path = {
+        path: (language, size, json.loads(raw_symbols), json.loads(raw_imports))
+        for path, language, size, raw_symbols, raw_imports, _digest in metadata_rows
+    }
+    for row in metadata_rows:
+        digest_by_path[row[0]] = row[5]
+    total_files = conn.execute("SELECT COUNT(*) FROM files").fetchone()[0]
     conn.close()
+
+    history_by_path: dict[str, list[tuple[str, str]]] = {}
+    history_by_path.update(history)
     relations: dict[str, list[tuple[str, str, float]]] = {}
-    for source, target, kind, weight in edge_rows:
+    for source, target, kind, weight in relation_rows.values():
         source_path = source.removeprefix("file:")
         target_path = target.removeprefix("file:")
         relations.setdefault(source_path, []).append((target_path, kind, weight))
     ranked = []
-    lexical_matches: set[str] = set()
-    for path, language, size, raw_symbols, raw_imports, _digest in rows:
-        symbols = json.loads(raw_symbols)
-        imports = json.loads(raw_imports)
-        searchable = _terms(path.replace("/", " ")) | _terms(" ".join(symbols + imports))
-        overlap = searchable & task_terms
-        if not overlap:
+    for path in sorted(lexical_matches):
+        if path not in metadata_by_path:
             continue
-        lexical_matches.add(path)
-        score = sum(1 / max(1, frequencies[word]) for word in overlap)
+        language, size, symbols, imports = metadata_by_path[path]
+        overlap = overlap_by_path[path]
+        score = sum(1 / max(1, frequencies.get(word, 0)) for word in overlap)
         score += min(len(history_by_path.get(path, [])), 5) * 0.08
+        score += max(0.0, semantic_scores.get(path, 0.0)) * 0.5
         ranked.append((score, path, language, size, symbols, imports))
     ranked_paths = {row[1] for row in ranked}
-    metadata_by_path = {
-        path: (language, size, json.loads(raw_symbols), json.loads(raw_imports))
-        for path, language, size, raw_symbols, raw_imports, _digest in rows
-    }
+    for path, similarity in semantic_scores.items():
+        if path in ranked_paths or similarity < 0.35:
+            continue
+        if path not in metadata_by_path:
+            continue
+        language, size, symbols, imports = metadata_by_path[path]
+        ranked.append((max(0.0, similarity) * 0.5, path, language, size, symbols, imports))
+    ranked_paths = {row[1] for row in ranked}
     for source_path, related in relations.items():
         if source_path in ranked_paths or source_path not in metadata_by_path:
             continue
@@ -928,26 +1224,15 @@ def context_for(
         )
         ranked.append((relation_score, source_path, language, size, symbols, imports))
     ranked.sort(key=lambda item: (-item[0], item[1]))
-    selected = []
-    used_tokens = 30
+    selected: list[dict[str, object]] = []
+    selected_content: list[dict[str, object]] = []
+    used_tokens = _count_context_tokens({"files": selected_content}, config.tokenizer_model)
     for score, path, language, size, symbols, imports in ranked:
-        details = []
-        if symbols:
-            details.append("symbols: " + ", ".join(symbols[:8]))
-        if imports:
-            details.append("imports: " + ", ".join(imports[:6]))
         recent = history_by_path.get(path, [])
-        if recent:
-            details.append("recent: " + recent[0][0][:100])
         related_files = [
             {"path": target, "relationship": kind.lower(), "weight": weight}
             for target, kind, weight in relations.get(path, [])[:8]
         ]
-        if related_files:
-            details.append("related: " + ", ".join(item["path"] for item in related_files[:4]))
-        estimate = max(12, (len(path) + len(" ".join(details))) // 4)
-        if used_tokens + estimate > budget:
-            continue
         excerpt = ""
         source_path = root / path
         try:
@@ -970,38 +1255,59 @@ def context_for(
                         selected_lines.update(range(max(0, line_number - 1), min(len(source_lines), line_number + 2)))
                     if not selected_lines:
                         selected_lines.update(range(min(8, len(source_lines))))
-                    remaining_chars = min(480, max(0, (budget - used_tokens - estimate) * 4))
                     snippet = "\n".join(
                         f"{line_number + 1}: {source_lines[line_number]}"
                         for line_number in sorted(selected_lines)
                     )
-                    excerpt = snippet[:remaining_chars] if remaining_chars >= 8 else ""
+                    excerpt = snippet[:480]
         except OSError:
             pass
-        excerpt_tokens = (len(excerpt) + 3) // 4
-        if used_tokens + estimate + excerpt_tokens > budget:
-            excerpt = ""
-            excerpt_tokens = 0
-        selected.append(
-            {
-                "path": path,
-                "language": language,
-                "score": round(score, 3),
-                "symbols": symbols[:8],
-                "imports": imports[:6],
-                "recent_change": recent[0][0] if recent else None,
-                "relationships": related_files,
-                "excerpt": excerpt,
-                "estimated_tokens": estimate + excerpt_tokens,
-            }
+        content = {
+            "path": path,
+            "language": language,
+            "score": round(score, 3),
+            "symbols": symbols[:8],
+            "imports": imports[:6],
+            "recent_change": recent[0][0] if recent else None,
+            "relationships": related_files,
+            "excerpt": excerpt,
+        }
+        candidate_content = [*selected_content, content]
+        candidate_tokens = _count_context_tokens(
+            {"files": candidate_content}, config.tokenizer_model
         )
-        used_tokens += estimate + excerpt_tokens
+        if candidate_tokens > budget and excerpt:
+            low, high = 0, len(excerpt)
+            best_excerpt = ""
+            while low <= high:
+                middle = (low + high) // 2
+                content["excerpt"] = excerpt[:middle]
+                candidate_tokens = _count_context_tokens(
+                    {"files": candidate_content}, config.tokenizer_model
+                )
+                if candidate_tokens <= budget:
+                    best_excerpt = content["excerpt"]
+                    low = middle + 1
+                else:
+                    high = middle - 1
+            content["excerpt"] = best_excerpt
+            candidate_tokens = _count_context_tokens(
+                {"files": candidate_content}, config.tokenizer_model
+            )
+        if candidate_tokens > budget:
+            continue
+        selected_content.append(content)
+        used_tokens = candidate_tokens
+        file_tokens = _count_context_tokens(content, config.tokenizer_model)
+        selected.append({**content, "estimated_tokens": file_tokens})
     return {
         "task": task,
         "files": selected,
         "estimated_tokens": used_tokens,
         "token_budget": budget,
-        "files_avoided": max(0, len(rows) - len(selected)),
+        "token_count_method": "tiktoken" if config.tokenizer_model else "approximate",
+        "tokenizer_model": config.tokenizer_model or None,
+        "files_avoided": max(0, total_files - len(selected)),
         "confidence": "high" if len(selected) >= 3 else "medium" if selected else "low",
     }
 
@@ -1062,22 +1368,27 @@ def architecture(root: Path) -> dict[str, object]:
 
 
 def architecture_at(root: Path, revision: str) -> dict[str, object]:
-    raw_paths = git(root, "ls-tree", "-r", "--name-only", "-z", revision)
-    paths = [path for path in raw_paths.split("\0") if path]
+    snapshot = graph_at(root, revision)
     languages: Counter[str] = Counter()
     modules: Counter[str] = Counter()
-    for path in paths:
-        language = LANGUAGES.get(Path(path).suffix.lower())
+    files = [
+        node for node in snapshot["nodes"]
+        if node["type"] == "File" and not node["metadata"].get("deleted")
+    ]
+    for node in files:
+        path = node["path"]
+        language = node["metadata"].get("language")
         if language:
             languages[language] += 1
         modules[path.split("/", 1)[0] if "/" in path else "."] += 1
+    relationships = Counter(edge["type"] for edge in snapshot["edges"])
     return {
-        "revision": revision,
-        "files": len(paths),
+        "revision": snapshot["revision"],
+        "files": len(files),
         "languages": dict(sorted(languages.items())),
         "modules": dict(sorted(modules.items())),
-        "relationships": {},
-        "note": "Historical summary is based on tracked paths and file extensions.",
+        "relationships": dict(sorted(relationships.items())),
+        "note": "Architecture is reconstructed from a cached commit-addressable graph snapshot.",
     }
 
 
@@ -1231,6 +1542,253 @@ def graph_export(root: Path) -> dict[str, object]:
     ]
     conn.close()
     return {"nodes": nodes, "edges": edges}
+
+
+def graph_at(root: Path, revision: str) -> dict[str, object]:
+    """Reconstruct and cache the complete source graph for a Git commit."""
+    if not revision or revision.startswith("-"):
+        raise GitGraphError("A valid commit or revision is required.")
+    resolved = git(
+        root, "rev-parse", "--verify", "--end-of-options", f"{revision}^{{commit}}"
+    ).strip()
+    if not resolved:
+        raise GitGraphError(f"Unknown commit or revision: {revision}")
+    conn = connect(root)
+    cached = conn.execute(
+        "SELECT config_hash, graph_json FROM graph_snapshots WHERE revision=?", (resolved,)
+    ).fetchone()
+    patterns = _ignore_patterns(root)
+    config = load_config(root)
+    config_hash = hashlib.sha256(
+        json.dumps(
+            [
+                INDEX_VERSION, patterns, config.history_enabled,
+                config.history_commits, config.co_changes_enabled,
+                _TREE_SITTER_AVAILABLE,
+            ],
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    if cached and cached[0] == config_hash:
+        conn.close()
+        return json.loads(cached[1])
+    tree = git(root, "ls-tree", "-r", "-z", "--full-tree", resolved)
+    entries: list[tuple[str, str, str]] = []
+    for item in tree.split("\0"):
+        if not item or "\t" not in item:
+            continue
+        metadata, path = item.split("\t", 1)
+        mode, object_type, object_id = metadata.split()
+        if (
+            object_type == "blob"
+            and mode != "120000"
+            and Path(path).suffix.lower() in LANGUAGES
+            and not is_ignored(path, patterns)
+        ):
+            entries.append((path, object_id, LANGUAGES[Path(path).suffix.lower()]))
+
+    eligible_ids = [object_id for _, object_id, _ in entries]
+    sizes_by_id: dict[str, int] = {}
+    for offset in range(0, len(eligible_ids), 500):
+        batch = eligible_ids[offset : offset + 500]
+        checked = subprocess.run(
+            ["git", "-C", str(root), "cat-file", "--batch-check"],
+            input="".join(f"{object_id}\n" for object_id in batch),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+        if checked.returncode:
+            conn.close()
+            raise GitGraphError(checked.stderr.strip() or "Could not inspect revision blobs.")
+        for line in checked.stdout.splitlines():
+            fields = line.split()
+            if len(fields) == 3 and fields[1] == "blob":
+                try:
+                    sizes_by_id[fields[0]] = int(fields[2])
+                except ValueError:
+                    continue
+
+    entries = [
+        entry for entry in entries
+        if sizes_by_id.get(entry[1], 2_000_001) <= 2_000_000
+    ]
+    files: dict[str, tuple[str, int, tuple[str, ...], tuple[str, ...], tuple[str, ...]]] = {}
+    for offset in range(0, len(entries), 32):
+        batch_entries = entries[offset : offset + 32]
+        batch = [object_id for _, object_id, _ in batch_entries]
+        fetched = subprocess.run(
+            ["git", "-C", str(root), "cat-file", "--batch"],
+            input="".join(f"{object_id}\n" for object_id in batch).encode("ascii"),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        if fetched.returncode:
+            conn.close()
+            raise GitGraphError(fetched.stderr.decode("utf-8", errors="replace").strip())
+        output = fetched.stdout
+        cursor = 0
+        for (path, expected_id, language) in batch_entries:
+            newline = output.find(b"\n", cursor)
+            if newline < 0:
+                conn.close()
+                raise GitGraphError("Invalid Git object response while building graph snapshot.")
+            header = output[cursor:newline].split()
+            if len(header) != 3 or header[0].decode("ascii") != expected_id:
+                conn.close()
+                raise GitGraphError("Unexpected Git object in graph snapshot.")
+            try:
+                size = int(header[2])
+            except ValueError as exc:
+                conn.close()
+                raise GitGraphError("Invalid Git object size in graph snapshot.") from exc
+            start = newline + 1
+            end = start + size
+            data = output[start:end]
+            cursor = end + 1
+            if len(data) > 2_000_000 or b"\0" in data:
+                continue
+            source = data.decode("utf-8", errors="replace")
+            if any(SECRET_LINE.search(line) for line in source.splitlines()):
+                continue
+            analysis = analyze(path, source, language)
+            files[path] = (
+                language, len(data), analysis.symbols, analysis.imports, analysis.calls
+            )
+
+    nodes: dict[str, dict[str, object]] = {}
+    edges: dict[tuple[str, str, str], dict[str, object]] = {}
+
+    def add_node(node_id: str, kind: str, name: str, path: str | None, metadata=None):
+        nodes[node_id] = {
+            "id": node_id, "type": kind, "name": name, "path": path,
+            "metadata": metadata or {},
+        }
+
+    def add_edge(source: str, target: str, kind: str, weight: float = 1.0):
+        edges[(source, target, kind)] = {
+            "source": source, "target": target, "type": kind, "weight": weight,
+        }
+
+    symbol_index: dict[str, list[str]] = {}
+    calls_by_path: dict[str, tuple[str, ...]] = {}
+    for path, (language, size, symbols, _imports, calls) in files.items():
+        file_id = f"file:{path}"
+        add_node(file_id, "File", path, path, {"language": language, "bytes": size})
+        calls_by_path[path] = calls
+        for symbol in symbols:
+            symbol_id = f"symbol:{path}::{symbol}"
+            add_node(symbol_id, "Symbol", symbol, path)
+            add_edge(file_id, symbol_id, "CONTAINS")
+            symbol_index.setdefault(symbol, []).append(symbol_id)
+            symbol_index.setdefault(symbol.rsplit(".", 1)[-1], []).append(symbol_id)
+    for path, calls in calls_by_path.items():
+        file_id = f"file:{path}"
+        for call in calls:
+            reference_id = f"reference:{path}::{call}"
+            add_node(reference_id, "SymbolReference", call, path)
+            for target in symbol_index.get(call, []) + symbol_index.get(call.rsplit(".", 1)[-1], []):
+                if target != f"symbol:{path}::{call}":
+                    add_edge(file_id, target, "CALLS")
+
+    available = set(files)
+    for source_path, (_language, _size, _symbols, imports, _calls) in files.items():
+        for import_name in imports:
+            for target_path in module_candidates(import_name, source_path, available):
+                if target_path != source_path:
+                    add_edge(f"file:{source_path}", f"file:{target_path}", "DEPENDS_ON")
+
+    if config.history_enabled:
+        history_tokens = git(
+            root, "log", "-n", str(config.history_commits),
+            "--name-status", "-M", "-z",
+            "--format=COMMIT%x00%H%x00%an%x00%s%x00%cI", resolved,
+        ).split("\0")
+        cochange_counts: Counter[tuple[str, str]] = Counter()
+        history_index = 0
+        while history_index < len(history_tokens):
+            if history_tokens[history_index].strip() != "COMMIT":
+                history_index += 1
+                continue
+            history_index += 1
+            if history_index + 3 >= len(history_tokens):
+                break
+            commit_hash, author, subject, committed_at = history_tokens[
+                history_index : history_index + 4
+            ]
+            history_index += 4
+            commit_id = f"commit:{commit_hash}"
+            add_node(
+                commit_id, "Commit", subject, None,
+                {
+                    "hash": commit_hash, "author": author,
+                    "subject": subject, "committed_at": committed_at,
+                },
+            )
+            changed_paths: list[str] = []
+            while (
+                history_index < len(history_tokens)
+                and history_tokens[history_index].strip() != "COMMIT"
+            ):
+                status = history_tokens[history_index].strip()
+                history_index += 1
+                if not status:
+                    continue
+                if status.startswith(("R", "C")) and history_index + 1 < len(history_tokens):
+                    old_path, new_path = history_tokens[history_index : history_index + 2]
+                    history_index += 2
+                    changed_paths.extend((old_path, new_path))
+                    if old_path not in files:
+                        add_node(
+                            f"file:{old_path}", "File", old_path, old_path,
+                            {"deleted": True},
+                        )
+                    if new_path not in files:
+                        add_node(
+                            f"file:{new_path}", "File", new_path, new_path,
+                            {"deleted": True},
+                        )
+                    add_edge(f"file:{old_path}", f"file:{new_path}", "RENAMED_IN")
+                elif history_index < len(history_tokens):
+                    path = history_tokens[history_index]
+                    history_index += 1
+                    changed_paths.append(path)
+                    if path not in files and f"file:{path}" not in nodes:
+                        add_node(
+                            f"file:{path}", "File", path, path, {"deleted": True}
+                        )
+            for path in set(changed_paths):
+                if f"file:{path}" in nodes:
+                    add_edge(f"file:{path}", commit_id, "CHANGED_IN")
+            if config.co_changes_enabled:
+                paths = sorted(set(changed_paths))[:40]
+                for left_index, left in enumerate(paths):
+                    for right in paths[left_index + 1 :]:
+                        cochange_counts[(left, right)] += 1
+        for (left, right), count in cochange_counts.items():
+            add_edge(
+                f"file:{left}", f"file:{right}", "CO_CHANGED_WITH", float(count)
+            )
+            add_edge(
+                f"file:{right}", f"file:{left}", "CO_CHANGED_WITH", float(count)
+            )
+    result = {
+        "revision": resolved,
+        "nodes": sorted(nodes.values(), key=lambda item: (item["type"], item["id"])),
+        "edges": sorted(edges.values(), key=lambda item: (item["type"], item["source"], item["target"])),
+    }
+    with conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO graph_snapshots(revision, config_hash, graph_json) "
+            "VALUES (?, ?, ?)",
+            (resolved, config_hash, json.dumps(result)),
+        )
+    conn.close()
+    return result
 
 
 def file_history(root: Path, path: str) -> list[dict[str, str]]:

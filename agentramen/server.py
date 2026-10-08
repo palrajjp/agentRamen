@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from importlib.resources import files
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
@@ -35,11 +36,12 @@ WEB_UI = r"""<!doctype html>
 @media(max-width:850px){.app-shell{grid-template-columns:1fr}.sidebar{padding:12px 16px;border-right:0;border-bottom:1px solid var(--line)}.repo-label,.privacy-note{display:none}.nav-list{display:flex;overflow:auto;margin:0;gap:4px}.nav-item{width:auto;white-space:nowrap}.nav-mark{display:none}main{padding:30px 22px 50px}.stats{grid-template-columns:repeat(2,minmax(0,1fr))}.stat:nth-child(3){padding-left:0;border-left:0;border-top:1px solid var(--line)}.stat:nth-child(4){border-top:1px solid var(--line)}}@media(max-width:540px){.topbar{height:56px;padding:0 16px}.app-shell{min-height:calc(100vh - 56px)}.local-badge{display:none}main{padding:25px 15px 38px}.page-head{align-items:flex-start;flex-direction:column;margin-bottom:22px}.page-head h1{font-size:25px}.stats{margin-bottom:28px}.stat{padding:14px 8px 14px 0}.stat+.stat{padding-left:12px}.stat-value{font-size:20px}.form-panel{padding:14px}.form-row{align-items:stretch;flex-wrap:wrap}.budget-field{width:calc(50% - 8px)}.form-row .primary{width:100%;margin-left:0}.architecture-grid{grid-template-columns:1fr;gap:22px}.file-top{flex-direction:column}.file-badges{justify-content:flex-start}.list-item{align-items:flex-start}}
 </style>
 <style>
+.brand-logo{display:block;width:146px;height:auto}.brand-glyph{display:none}
 @media(max-width:850px){.app-shell{grid-template-columns:minmax(0,1fr)}.sidebar,.nav-list,main{min-width:0;max-width:100%}.nav-list{width:100%}}
 </style>
 <body>
 <header class="topbar">
-    <a class="brand" href="#overview" aria-label="agentRamen overview"><span class="brand-glyph">G</span><span>agentRamen</span></a>
+    <a class="brand" href="#overview" aria-label="agentRamen overview"><img class="brand-logo" src="/assets/agentramen-logo.png" alt=""></a>
     <div class="top-meta"><span class="local-badge">LOCAL WORKSPACE</span><span class="status-pill" id="connection-status" data-state="loading">Connecting</span></div>
 </header>
 <div class="app-shell">
@@ -150,6 +152,15 @@ def create_server(root: Path, host: str = "127.0.0.1", port: int = 8765):
                         "default-src 'self'; script-src 'self' 'unsafe-inline'; "
                         "style-src 'self' 'unsafe-inline'",
                     )
+                    self.end_headers()
+                    self.wfile.write(payload)
+                    return
+                elif path == "/assets/agentramen-logo.png":
+                    payload = files("agentramen").joinpath("assets", "agentramen-logo.png").read_bytes()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "image/png")
+                    self.send_header("Content-Length", str(len(payload)))
+                    self.send_header("Cache-Control", "public, max-age=86400")
                     self.end_headers()
                     self.wfile.write(payload)
                     return

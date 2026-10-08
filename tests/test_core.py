@@ -415,7 +415,10 @@ class GitGraphIndexTests(unittest.TestCase):
             with urlopen(override_request) as response:
                 override_value = json.load(response)
             self.assertEqual(architecture_value["files"], 1)
-            self.assertIn("Graph snapshot", page)
+            self.assertIn("Task context", page)
+            self.assertIn("Architecture", page)
+            self.assertIn('id="hotspot-list"', page)
+            self.assertIn(r"lines.join('\n')", page)
             self.assertEqual(snapshot["revision"], revision)
             self.assertEqual(context_value["files"][0]["path"], "auth.py")
             self.assertEqual(context_value["token_budget"], 500)

@@ -248,6 +248,26 @@ class AgentRamenIndexTests(unittest.TestCase):
         )
         self.assertEqual(context_for(self.root, "Credentials")["files"], [])
 
+    def test_test_fixture_placeholder_credentials_stay_indexed(self):
+        (self.root / "tests").mkdir()
+        (self.root / "tests" / "test_auth.py").write_text(
+            "def test_auth():\n    api_key = 'fake-api-key-for-fixture-123'\n",
+            encoding="utf-8",
+        )
+        self.commit("add fixture")
+        index_repository(self.root)
+        self.assertEqual(repository_status(self.root)["files"], 1)
+
+    def test_real_looking_credentials_in_tests_are_still_excluded(self):
+        (self.root / "tests").mkdir()
+        (self.root / "tests" / "test_auth.py").write_text(
+            "api_key = 'Zq81hTr0Pw93LkdUv72Mx'\n", encoding="utf-8"
+        )
+        self.commit("add real-looking")
+        with self.assertLogs("agentramen", level="WARNING"):
+            index_repository(self.root)
+        self.assertEqual(repository_status(self.root)["files"], 0)
+
     def test_configured_ignore_patterns_are_applied(self):
         (self.root / ".agentramen.yml").write_text("ignore:\n  - private/\n", encoding="utf-8")
         (self.root / "private").mkdir()

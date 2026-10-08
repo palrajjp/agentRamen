@@ -39,7 +39,6 @@ SECRET_LINE = re.compile(
     r"(?:api[_-]?key|secret|password|token)\s*[:=]\s*['\"]?[A-Za-z0-9_./+=-]{12,})",
     re.IGNORECASE,
 )
-WORD = re.compile(r"[A-Za-z_][A-Za-z0-9_]{1,}")
 SYMBOL = re.compile(
     r"^\s*(?:export\s+)?(?:async\s+)?(?:class|interface|type|enum|function|def|fn|func)\s+([A-Za-z_$][\w$]*)",
     re.MULTILINE,
@@ -630,14 +629,40 @@ def repository_status(root: Path) -> dict[str, object]:
 
 def _terms(text: str) -> set[str]:
     terms = set()
-    for word in WORD.findall(text):
+    words = []
+    current = []
+    for character in text:
+        if character.isalnum():
+            current.append(character)
+        elif current:
+            words.append("".join(current))
+            current = []
+    if current:
+        words.append("".join(current))
+    for word in words:
         terms.add(word.lower())
-        terms.update(part.lower() for part in word.split("_") if len(part) > 1)
-        terms.update(
-            part.lower()
-            for part in re.findall(r"[A-Z]?[a-z]+|[A-Z]+(?=[A-Z]|$)|[0-9]+", word)
-            if len(part) > 1
-        )
+        pieces = []
+        current_piece = []
+        for index, character in enumerate(word):
+            if (
+                character.isupper()
+                and current_piece
+                and (
+                    current_piece[-1].islower()
+                    or current_piece[-1].isdigit()
+                    or (
+                        current_piece[-1].isupper()
+                        and index + 1 < len(word)
+                        and word[index + 1].islower()
+                    )
+                )
+            ):
+                pieces.append("".join(current_piece))
+                current_piece = []
+            current_piece.append(character)
+        if current_piece:
+            pieces.append("".join(current_piece))
+        terms.update(piece.lower() for piece in pieces if len(piece) > 1)
     return terms
 
 

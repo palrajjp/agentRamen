@@ -12,6 +12,9 @@ Apache-2.0 licensed. See the [security policy](SECURITY.md) and [community code 
 
 agentRamen indexes source structure and Git history, then retrieves task-relevant files and excerpts. It is local-first by default: each developer keeps a private SQLite index. Teams can optionally publish sanitized, commit-pinned snapshots to a centrally hosted, OIDC-protected read-only MCP service.
 
+<img width="1048" height="642" alt="agentramen-demo" src="https://github.com/user-attachments/assets/668053b5-5dae-4184-a645-a86e96b78352" />
+
+
 ## Quick start
 
 Install agentRamen, then run it from the repository you want to explore:

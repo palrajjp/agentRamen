@@ -12,6 +12,10 @@ license = { file = "LICENSE" }
 authors = [{ name = "GitGraph contributors" }]
 dependencies = []
 
+[project.optional-dependencies]
+treesitter = ["tree-sitter-language-pack>=1.21.0"]
+semantic = ["fastembed>=0.9.0"]
+
 [project.scripts]
 gitgraph = "gitgraph.cli:main"
 

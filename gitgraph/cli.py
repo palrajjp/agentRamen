@@ -18,6 +18,7 @@ from .core import (
     file_history,
     find_root,
     git,
+    graph_at,
     graph_export,
     hotspots,
     index_repository,
@@ -292,6 +293,7 @@ def main(argv: list[str] | None = None) -> int:
     hot.add_argument("--limit", type=int, default=20)
     hot.add_argument("--json", action="store_true")
     export = subparsers.add_parser("export", help="Export the current graph")
+    export.add_argument("--at", dest="revision")
     export.add_argument("--json", action="store_true")
     diff = subparsers.add_parser("diff", help="Compare files changed between two commits")
     diff.add_argument("commit1")
@@ -333,7 +335,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "hotspots":
             value = hotspots(root, args.limit)
         elif args.command == "export":
-            value = graph_export(root)
+            value = graph_at(root, args.revision) if args.revision else graph_export(root)
         elif args.command == "diff":
             value = _diff(root, args.commit1, args.commit2)
         elif args.command == "changes":

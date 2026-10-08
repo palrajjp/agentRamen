@@ -4,6 +4,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 from urllib.request import Request, urlopen
 
@@ -16,6 +17,7 @@ from gitgraph.core import (
     explain_file,
     GitGraphError,
     graph_export,
+    graph_at,
     hotspots,
     index_repository,
     load_config,
@@ -216,8 +218,15 @@ class GitGraphIndexTests(unittest.TestCase):
         thread.start()
         try:
             address = f"http://127.0.0.1:{server.server_port}"
+            with urlopen(address + "/") as response:
+                page = response.read().decode("utf-8")
             with urlopen(address + "/api/v1/architecture") as response:
                 architecture_value = json.load(response)
+            revision = subprocess.check_output(
+                ["git", "-C", str(self.root), "rev-parse", "HEAD"], text=True
+            ).strip()
+            with urlopen(address + f"/api/v1/graph?at={revision}") as response:
+                snapshot = json.load(response)
             request = Request(
                 address + "/api/v1/context",
                 data=json.dumps({"task": "AuthService"}).encode(),
@@ -235,6 +244,8 @@ class GitGraphIndexTests(unittest.TestCase):
             with urlopen(override_request) as response:
                 override_value = json.load(response)
             self.assertEqual(architecture_value["files"], 1)
+            self.assertIn("Graph snapshot", page)
+            self.assertEqual(snapshot["revision"], revision)
             self.assertEqual(context_value["files"][0]["path"], "auth.py")
             self.assertEqual(context_value["token_budget"], 500)
             self.assertEqual(override_value["token_budget"], 300)
@@ -320,6 +331,87 @@ class GitGraphIndexTests(unittest.TestCase):
         self.assertEqual(impact["indirect_dependents"], ["dashboard.py"])
         context = context_for(self.root, "AuthService views")
         self.assertTrue(context["files"])
+
+    def test_tree_sitter_analyzer_falls_back_when_optional_package_is_missing(self):
+        from gitgraph.analyzers import TreeSitterAnalyzer
+
+        with patch("gitgraph.analyzers.importlib.import_module", side_effect=ImportError):
+            result = TreeSitterAnalyzer("javascript").analyze(
+                "auth.js", "export class AuthService {}\n"
+            )
+        self.assertIn("AuthService", result.symbols)
+
+    def test_tree_sitter_extracts_symbols_and_calls_when_installed(self):
+        try:
+            import tree_sitter_language_pack
+        except ImportError:
+            self.skipTest("Tree-sitter optional dependency is not installed")
+        from gitgraph.analyzers import analyze
+
+        result = analyze(
+            "auth.js",
+            "export class AuthService {}\nfunction login() { send(); }",
+            "javascript",
+        )
+        self.assertIn("AuthService", result.symbols)
+        self.assertIn("login", result.symbols)
+        self.assertIn("send", result.calls)
+
+    def test_semantic_embeddings_can_retrieve_without_lexical_overlap(self):
+        (self.root / ".gitgraph.yml").write_text(
+            "semantic:\n  enabled: true\n  model: test-model\n", encoding="utf-8"
+        )
+        (self.root / "access.py").write_text(
+            "class LoginManager:\n    pass\n", encoding="utf-8"
+        )
+        self.commit("add access manager")
+
+        with patch("gitgraph.core._embed_texts", side_effect=lambda _model, texts: [[1.0, 0.0] for _ in texts]):
+            index_repository(self.root)
+            context = context_for(self.root, "How can a visitor enter?", 500)
+
+        self.assertEqual(context["files"][0]["path"], "access.py")
+
+    def test_graph_at_builds_distinct_commit_addressable_snapshots(self):
+        (self.root / "auth.py").write_text("class Auth:\n    pass\n", encoding="utf-8")
+        (self.root / "views.py").write_text(
+            "from auth import Auth\n\ndef view():\n    return Auth()\n", encoding="utf-8"
+        )
+        self.commit("add initial modules")
+        first = subprocess.check_output(
+            ["git", "-C", str(self.root), "rev-parse", "HEAD"], text=True
+        ).strip()
+        index_repository(self.root)
+
+        (self.root / "views.py").unlink()
+        (self.root / "auth.py").write_text("class Identity:\n    pass\n", encoding="utf-8")
+        self.commit("replace modules")
+        second = subprocess.check_output(
+            ["git", "-C", str(self.root), "rev-parse", "HEAD"], text=True
+        ).strip()
+
+        first_graph = graph_at(self.root, first)
+        second_graph = graph_at(self.root, second)
+        self.assertEqual(first_graph["revision"], first)
+        self.assertTrue(
+            any(edge["type"] == "DEPENDS_ON" for edge in first_graph["edges"])
+        )
+        self.assertFalse(
+            any(edge["type"] == "DEPENDS_ON" for edge in second_graph["edges"])
+        )
+        self.assertTrue(
+            any(node["name"] == "Auth" for node in first_graph["nodes"])
+        )
+        self.assertTrue(
+            any(node["name"] == "Identity" for node in second_graph["nodes"])
+        )
+        self.assertTrue(any(node["type"] == "Commit" for node in second_graph["nodes"]))
+        self.assertTrue(
+            any(edge["type"] == "CHANGED_IN" for edge in second_graph["edges"])
+        )
+        self.assertTrue(
+            any(edge["type"] == "CO_CHANGED_WITH" for edge in second_graph["edges"])
+        )
 
     def test_incremental_update_resolves_new_target_and_removes_deleted_target(self):
         (self.root / "views.py").write_text(

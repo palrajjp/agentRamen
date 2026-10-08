@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import importlib
 import posixpath
 import re
 from dataclasses import dataclass
@@ -113,6 +114,66 @@ class RegexAnalyzer(LanguageAnalyzer):
         return Analysis(symbols=symbols, imports=imports)
 
 
+class TreeSitterAnalyzer(LanguageAnalyzer):
+    """Use bundled Tree-sitter grammars when the optional parser extra is installed."""
+
+    _definitions = {
+        "class_declaration", "class_definition", "class_specifier",
+        "function_declaration", "function_definition", "function_item",
+        "method_declaration", "method_definition", "method_item",
+        "interface_declaration", "trait_item", "struct_item", "enum_item",
+        "type_declaration", "type_alias_declaration", "record_declaration",
+    }
+    _calls = {"call_expression", "call", "method_invocation"}
+
+    def __init__(self, language: str):
+        self.language = language
+
+    def analyze(self, path: str, source: str) -> Analysis:
+        try:
+            get_parser = importlib.import_module("tree_sitter_language_pack").get_parser
+            tree = get_parser(self.language).parse(source.encode("utf-8"))
+        except (ImportError, LookupError, RuntimeError, TypeError, ValueError):
+            return RegexAnalyzer(self.language).analyze(path, source)
+
+        symbols: set[str] = set()
+        calls: set[str] = set()
+        source_bytes = source.encode("utf-8")
+        pending = [tree.root_node]
+        while pending:
+            node = pending.pop()
+            pending.extend(reversed(node.children))
+            if node.type in self._definitions:
+                name = node.child_by_field_name("name")
+                if name is None:
+                    name = next(
+                        (
+                            child for child in node.children
+                            if child.type in {
+                                "identifier", "type_identifier", "field_identifier",
+                            }
+                        ),
+                        None,
+                    )
+                if name is not None:
+                    symbols.add(source_bytes[name.start_byte:name.end_byte].decode("utf-8"))
+            if node.type in self._calls:
+                function = node.child_by_field_name("function") or node.child_by_field_name("name")
+                if function is None and node.children:
+                    function = node.children[0]
+                if function is not None:
+                    call = source_bytes[function.start_byte:function.end_byte].decode("utf-8")
+                    if call and len(call) <= 200:
+                        calls.add(call)
+
+        regex_analysis = RegexAnalyzer(self.language).analyze(path, source)
+        return Analysis(
+            symbols=tuple(sorted(symbols)) or regex_analysis.symbols,
+            imports=regex_analysis.imports,
+            calls=tuple(sorted(calls)),
+        )
+
+
 ANALYZERS: dict[str, LanguageAnalyzer] = {
     "python": PythonAnalyzer(),
 }
@@ -120,7 +181,10 @@ ANALYZERS: dict[str, LanguageAnalyzer] = {
 
 def analyze(path: str, source: str, language: str | None = None) -> Analysis:
     language = language or "unknown"
-    analyzer = ANALYZERS.get(language, RegexAnalyzer(language))
+    analyzer = ANALYZERS.get(
+        language,
+        TreeSitterAnalyzer(language) if language != "unknown" else RegexAnalyzer(language),
+    )
     return analyzer.analyze(path, source)
 
 

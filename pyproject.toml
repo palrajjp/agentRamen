@@ -39,3 +39,6 @@ agentramen = "agentramen.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["agentramen*"]
+
+[tool.setuptools.package-data]
+agentramen = ["assets/*.png"]

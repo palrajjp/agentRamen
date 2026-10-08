@@ -485,6 +485,9 @@ class AgentRamenIndexTests(unittest.TestCase):
             address = f"http://127.0.0.1:{server.server_port}"
             with urlopen(address + "/") as response:
                 page = response.read().decode("utf-8")
+            with urlopen(address + "/assets/agentramen-logo.png") as response:
+                self.assertEqual(response.headers.get_content_type(), "image/png")
+                logo = response.read()
             with urlopen(address + "/api/v1/architecture") as response:
                 architecture_value = json.load(response)
             revision = subprocess.check_output(
@@ -532,6 +535,8 @@ class AgentRamenIndexTests(unittest.TestCase):
             self.assertIn("Task context", page)
             self.assertIn("Architecture", page)
             self.assertIn('id="hotspot-list"', page)
+            self.assertIn('src="/assets/agentramen-logo.png"', page)
+            self.assertTrue(logo.startswith(b"\x89PNG\r\n\x1a\n"))
             self.assertIn(r"lines.join('\n')", page)
             self.assertEqual(snapshot["revision"], revision)
             self.assertEqual(context_value["files"][0]["path"], "auth.py")

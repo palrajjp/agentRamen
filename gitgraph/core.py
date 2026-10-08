@@ -4,6 +4,7 @@ import fnmatch
 import hashlib
 import json
 import os
+import posixpath
 import re
 import sqlite3
 import subprocess
@@ -16,6 +17,7 @@ from .analyzers import analyze, module_candidates
 DEFAULT_IGNORES = (
     ".git/",
     ".gitgraph/",
+    ".gitgraph-action/",
     "node_modules/",
     "dist/",
     "build/",
@@ -54,7 +56,7 @@ LANGUAGES = {
     ".php": "php", ".py": "python", ".rb": "ruby", ".rs": "rust",
     ".swift": "swift", ".ts": "typescript", ".tsx": "typescript",
 }
-INDEX_VERSION = "2"
+INDEX_VERSION = "3"
 
 
 class GitGraphError(RuntimeError):
@@ -156,6 +158,12 @@ def connect(root: Path) -> sqlite3.Connection:
             metadata TEXT NOT NULL DEFAULT '{}',
             PRIMARY KEY(source, target, type)
         );
+        CREATE TABLE IF NOT EXISTS file_imports (
+            importer TEXT NOT NULL,
+            import_name TEXT NOT NULL,
+            PRIMARY KEY(importer, import_name)
+        );
+        CREATE INDEX IF NOT EXISTS file_imports_by_name ON file_imports(import_name);
         """
     )
     file_columns = {row[1] for row in conn.execute("PRAGMA table_info(files)")}
@@ -166,13 +174,27 @@ def connect(root: Path) -> sqlite3.Connection:
 
 def _ignore_patterns(root: Path) -> list[str]:
     patterns = list(DEFAULT_IGNORES)
-    ignore_file = root / ".gitgraphignore"
-    if ignore_file.is_file():
-        patterns.extend(
-            line.strip()
-            for line in ignore_file.read_text(encoding="utf-8", errors="replace").splitlines()
-            if line.strip() and not line.lstrip().startswith("#")
-        )
+    for ignore_file in (root / ".gitgraphignore", root / ".gitgraph.yml"):
+        if not ignore_file.is_file():
+            continue
+        in_ignore_list = False
+        for line in ignore_file.read_text(encoding="utf-8", errors="replace").splitlines():
+            stripped = line.strip()
+            if ignore_file.name == ".gitgraph.yml":
+                if stripped == "ignore:":
+                    in_ignore_list = True
+                    continue
+                if in_ignore_list and line and not line[0].isspace():
+                    in_ignore_list = False
+                if not in_ignore_list:
+                    continue
+                match = re.match(r"^\s*-\s*(.*?)\s*$", line)
+                if match:
+                    pattern = match.group(1).strip("\"'")
+                    if pattern:
+                        patterns.append(pattern)
+            elif stripped and not stripped.startswith("#"):
+                patterns.append(stripped)
     return patterns
 
 
@@ -305,16 +327,14 @@ def _commit_history(root: Path, conn: sqlite3.Connection, last_commit: str | Non
 
 
 def _sync_graph(conn: sqlite3.Connection, changed_paths: set[str]) -> None:
+    existing_changed = set()
     for path in changed_paths:
         file_id = f"file:{path}"
         conn.execute(
             "DELETE FROM graph_edges WHERE source=? AND type IN ('CONTAINS', 'CALLS', 'DEPENDS_ON')",
             (file_id,),
         )
-        conn.execute(
-            "DELETE FROM graph_edges WHERE target=? AND type IN ('CONTAINS', 'CALLS', 'DEPENDS_ON')",
-            (file_id,),
-        )
+        conn.execute("DELETE FROM file_imports WHERE importer=?", (path,))
         conn.execute("DELETE FROM graph_nodes WHERE path=?", (path,))
         row = conn.execute(
             "SELECT language, bytes, symbols, imports, calls FROM files WHERE path=?",
@@ -322,12 +342,28 @@ def _sync_graph(conn: sqlite3.Connection, changed_paths: set[str]) -> None:
         ).fetchone()
         if row is None:
             conn.execute(
-                "INSERT OR IGNORE INTO graph_nodes(id, type, name, path, metadata) "
-                "VALUES (?, 'File', ?, ?, '{\"deleted\": true}')",
-                (file_id, path, path),
+                "DELETE FROM graph_edges WHERE target=? AND type IN ('DEPENDS_ON', 'CALLS')",
+                (file_id,),
             )
+            historic = conn.execute(
+                "SELECT 1 FROM graph_edges WHERE type IN ('CHANGED_IN', 'RENAMED_IN') "
+                "AND (source=? OR target=?) LIMIT 1",
+                (file_id, file_id),
+            ).fetchone()
+            if historic:
+                conn.execute(
+                    "INSERT OR IGNORE INTO graph_nodes(id, type, name, path, metadata) "
+                    "VALUES (?, 'File', ?, ?, '{\"deleted\": true}')",
+                    (file_id, path, path),
+                )
             continue
+        existing_changed.add(path)
         language, size, raw_symbols, raw_imports, raw_calls = row
+        imports = json.loads(raw_imports)
+        conn.executemany(
+            "INSERT OR IGNORE INTO file_imports(importer, import_name) VALUES (?, ?)",
+            [(path, import_name) for import_name in imports],
+        )
         conn.execute(
             "INSERT OR REPLACE INTO graph_nodes(id, type, name, path, metadata) "
             "VALUES (?, 'File', ?, ?, ?)",
@@ -366,16 +402,75 @@ def _sync_graph(conn: sqlite3.Connection, changed_paths: set[str]) -> None:
                     "VALUES (?, ?, 'CALLS')",
                     (f"file:{path}", target_id),
                 )
-    conn.execute("DELETE FROM graph_edges WHERE type='DEPENDS_ON'")
-    paths = {row[0] for row in conn.execute("SELECT path FROM files")}
-    for source_path, raw_imports in conn.execute("SELECT path, imports FROM files"):
-        for import_name in json.loads(raw_imports):
-            for target_path in module_candidates(import_name, source_path, paths):
-                if source_path != target_path:
+    candidates_by_source: list[tuple[str, set[str]]] = []
+    candidate_paths: set[str] = set()
+    for source_path in existing_changed:
+        imports = [
+            row[0] for row in conn.execute(
+                "SELECT import_name FROM file_imports WHERE importer=?", (source_path,)
+            )
+        ]
+        candidates = set()
+        for import_name in imports:
+            candidates.update(module_candidates(import_name, source_path))
+        candidates.discard(source_path)
+        candidates_by_source.append((source_path, candidates))
+        candidate_paths.update(candidates)
+    available = set()
+    candidates = sorted(candidate_paths)
+    for offset in range(0, len(candidates), 900):
+        batch = candidates[offset : offset + 900]
+        if not batch:
+            continue
+        placeholders = ",".join("?" for _ in batch)
+        available.update(
+            row[0] for row in conn.execute(
+                f"SELECT path FROM files WHERE path IN ({placeholders})", batch
+            )
+        )
+    for source_path, candidates in candidates_by_source:
+        for target_path in candidates & available:
+            conn.execute(
+                "INSERT OR IGNORE INTO graph_edges(source, target, type, weight) "
+                "VALUES (?, ?, 'DEPENDS_ON', 1)",
+                (f"file:{source_path}", f"file:{target_path}"),
+            )
+
+    changed_aliases = set()
+    for path in existing_changed:
+        module = posixpath.splitext(path)[0]
+        if posixpath.basename(module) in ("__init__", "index"):
+            module = posixpath.dirname(module)
+        parts = module.split("/")
+        changed_aliases.update(".".join(parts[index:]) for index in range(len(parts)))
+    if changed_aliases:
+        aliases = sorted(changed_aliases)
+        for offset in range(0, len(aliases), 900):
+            batch = aliases[offset : offset + 900]
+            placeholders = ",".join("?" for _ in batch)
+            rows = conn.execute(
+                f"SELECT importer, import_name FROM file_imports "
+                f"WHERE import_name IN ({placeholders})",
+                batch,
+            ).fetchall()
+            for importer, import_name in rows:
+                for target_path in existing_changed:
+                    if target_path in module_candidates(import_name, importer, {target_path}):
+                        conn.execute(
+                            "INSERT OR IGNORE INTO graph_edges(source, target, type, weight) "
+                            "VALUES (?, ?, 'DEPENDS_ON', 1)",
+                            (f"file:{importer}", f"file:{target_path}"),
+                        )
+        relative_imports = conn.execute(
+            "SELECT importer, import_name FROM file_imports WHERE import_name LIKE '.%'"
+        ).fetchall()
+        for importer, import_name in relative_imports:
+            for target_path in existing_changed:
+                if target_path in module_candidates(import_name, importer, {target_path}):
                     conn.execute(
                         "INSERT OR IGNORE INTO graph_edges(source, target, type, weight) "
                         "VALUES (?, ?, 'DEPENDS_ON', 1)",
-                        (f"file:{source_path}", f"file:{target_path}"),
+                        (f"file:{importer}", f"file:{target_path}"),
                     )
 
 
@@ -421,6 +516,7 @@ def index_repository(root: Path) -> dict[str, int]:
     head = git(root, "rev-parse", "--verify", "HEAD", check=False).strip()
     is_descendant = not last_commit or not head or last_commit == head or _is_ancestor(root, last_commit, head)
     if not is_descendant:
+        changed_graph_paths.update(previous)
         previous = {}
         conn.execute("DELETE FROM files")
     changed_by_commits: set[str] = set()
@@ -481,6 +577,7 @@ def index_repository(root: Path) -> dict[str, int]:
             text = data.decode("utf-8", errors="replace")
             if any(SECRET_LINE.search(line) for line in text.splitlines()):
                 conn.execute("DELETE FROM files WHERE path=?", (path,))
+                changed_graph_paths.add(path)
                 continue
             language = LANGUAGES.get(Path(path).suffix.lower())
             analysis = analyze(path, text, language)
@@ -532,7 +629,16 @@ def repository_status(root: Path) -> dict[str, object]:
 
 
 def _terms(text: str) -> set[str]:
-    return {word.lower() for word in WORD.findall(text)}
+    terms = set()
+    for word in WORD.findall(text):
+        terms.add(word.lower())
+        terms.update(part.lower() for part in word.split("_") if len(part) > 1)
+        terms.update(
+            part.lower()
+            for part in re.findall(r"[A-Z]?[a-z]+|[A-Z]+(?=[A-Z]|$)|[0-9]+", word)
+            if len(part) > 1
+        )
+    return terms
 
 
 def context_for(root: Path, task: str, budget: int = 2000) -> dict[str, object]:
@@ -540,7 +646,7 @@ def context_for(root: Path, task: str, budget: int = 2000) -> dict[str, object]:
         raise GitGraphError("Token budget must be at least 100.")
     conn = connect(root)
     rows = conn.execute(
-        "SELECT path, language, bytes, symbols, imports FROM files"
+        "SELECT path, language, bytes, symbols, imports, digest FROM files"
     ).fetchall()
     history = conn.execute(
         "SELECT cf.path, c.subject, c.hash FROM commit_files cf "
@@ -549,6 +655,7 @@ def context_for(root: Path, task: str, budget: int = 2000) -> dict[str, object]:
     conn.close()
     task_terms = _terms(task)
     frequencies = Counter(term for path, *_ in rows for term in _terms(path.replace("/", " ")))
+    digest_by_path = {row[0]: row[5] for row in rows}
     history_by_path: dict[str, list[tuple[str, str]]] = {}
     for path, subject, commit_hash in history:
         history_by_path.setdefault(path, []).append((subject, commit_hash))
@@ -565,7 +672,7 @@ def context_for(root: Path, task: str, budget: int = 2000) -> dict[str, object]:
         relations.setdefault(source_path, []).append((target_path, kind, weight))
     ranked = []
     lexical_matches: set[str] = set()
-    for path, language, size, raw_symbols, raw_imports in rows:
+    for path, language, size, raw_symbols, raw_imports, _digest in rows:
         symbols = json.loads(raw_symbols)
         imports = json.loads(raw_imports)
         searchable = _terms(path.replace("/", " ")) | _terms(" ".join(symbols + imports))
@@ -579,7 +686,7 @@ def context_for(root: Path, task: str, budget: int = 2000) -> dict[str, object]:
     ranked_paths = {row[1] for row in ranked}
     metadata_by_path = {
         path: (language, size, json.loads(raw_symbols), json.loads(raw_imports))
-        for path, language, size, raw_symbols, raw_imports in rows
+        for path, language, size, raw_symbols, raw_imports, _digest in rows
     }
     for source_path, related in relations.items():
         if source_path in ranked_paths or source_path not in metadata_by_path:
@@ -597,7 +704,7 @@ def context_for(root: Path, task: str, budget: int = 2000) -> dict[str, object]:
         ranked.append((relation_score, source_path, language, size, symbols, imports))
     ranked.sort(key=lambda item: (-item[0], item[1]))
     selected = []
-    used_tokens = 80
+    used_tokens = 30
     for score, path, language, size, symbols, imports in ranked:
         details = []
         if symbols:
@@ -616,6 +723,40 @@ def context_for(root: Path, task: str, budget: int = 2000) -> dict[str, object]:
         estimate = max(12, (len(path) + len(" ".join(details))) // 4)
         if used_tokens + estimate > budget:
             continue
+        excerpt = ""
+        source_path = root / path
+        try:
+            source_bytes = source_path.read_bytes()
+            if (
+                hashlib.sha256(source_bytes).hexdigest() == digest_by_path[path]
+                and b"\0" not in source_bytes
+                and len(source_bytes) <= 2_000_000
+            ):
+                source_text = source_bytes.decode("utf-8", errors="replace")
+                if not any(SECRET_LINE.search(line) for line in source_text.splitlines()):
+                    source_lines = source_text.splitlines()
+                    relevant = [
+                        line_number
+                        for line_number, line in enumerate(source_lines)
+                        if _terms(line) & task_terms
+                    ]
+                    selected_lines: set[int] = set()
+                    for line_number in relevant[:8]:
+                        selected_lines.update(range(max(0, line_number - 1), min(len(source_lines), line_number + 2)))
+                    if not selected_lines:
+                        selected_lines.update(range(min(8, len(source_lines))))
+                    remaining_chars = min(480, max(0, (budget - used_tokens - estimate) * 4))
+                    snippet = "\n".join(
+                        f"{line_number + 1}: {source_lines[line_number]}"
+                        for line_number in sorted(selected_lines)
+                    )
+                    excerpt = snippet[:remaining_chars] if remaining_chars >= 8 else ""
+        except OSError:
+            pass
+        excerpt_tokens = (len(excerpt) + 3) // 4
+        if used_tokens + estimate + excerpt_tokens > budget:
+            excerpt = ""
+            excerpt_tokens = 0
         selected.append(
             {
                 "path": path,
@@ -625,10 +766,11 @@ def context_for(root: Path, task: str, budget: int = 2000) -> dict[str, object]:
                 "imports": imports[:6],
                 "recent_change": recent[0][0] if recent else None,
                 "relationships": related_files,
-                "estimated_tokens": estimate,
+                "excerpt": excerpt,
+                "estimated_tokens": estimate + excerpt_tokens,
             }
         )
-        used_tokens += estimate
+        used_tokens += estimate + excerpt_tokens
     return {
         "task": task,
         "files": selected,
@@ -730,6 +872,67 @@ def hotspots(root: Path, limit: int = 20) -> list[dict[str, object]]:
     ]
 
 
+def find_dependencies(root: Path, path: str) -> list[str]:
+    report = explain_file(root, path)
+    return report["dependencies"]
+
+
+def find_dependents(root: Path, path: str, depth: int = 1) -> list[dict[str, object]]:
+    report = explain_file(root, path)
+    target = report["path"]
+    conn = connect(root)
+    discovered: dict[str, int] = {}
+    frontier = {target}
+    for distance in range(1, max(1, min(depth, 10)) + 1):
+        if not frontier:
+            break
+        placeholders = ",".join("?" for _ in frontier)
+        rows = conn.execute(
+            f"SELECT source, target FROM graph_edges WHERE type='DEPENDS_ON' "
+            f"AND target IN ({placeholders})",
+            tuple(f"file:{item}" for item in sorted(frontier)),
+        ).fetchall()
+        next_frontier = set()
+        for source, _target in rows:
+            dependent = source.removeprefix("file:")
+            if dependent != target and dependent not in discovered:
+                discovered[dependent] = distance
+                next_frontier.add(dependent)
+        frontier = next_frontier
+    conn.close()
+    return [
+        {"path": path, "depth": distance}
+        for path, distance in sorted(discovered.items(), key=lambda item: (item[1], item[0]))
+    ]
+
+
+def dependency_impact(root: Path, target: str, depth: int = 3) -> dict[str, object]:
+    report = explain_file(root, target)
+    dependents = find_dependents(root, report["path"], depth)
+    direct = [item["path"] for item in dependents if item["depth"] == 1]
+    indirect = [item["path"] for item in dependents if item["depth"] > 1]
+    terms = _terms(" ".join(report["symbols"]) + " " + report["path"])
+    conn = connect(root)
+    candidates = [row[0] for row in conn.execute("SELECT path FROM files")]
+    conn.close()
+    tests = [
+        path for path in candidates
+        if ("test" in path.lower() or path.lower().endswith("_spec.py"))
+        and (not terms or bool(terms & _terms(path)))
+    ]
+    return {
+        "target": report["path"],
+        "direct_dependents": direct,
+        "indirect_dependents": indirect,
+        "dependencies": report["dependencies"],
+        "tests": sorted(tests),
+        "co_changes": report["co_changes"],
+        "history": report["history"],
+        "estimated_impact": len(dependents),
+        "risk": "high" if len(dependents) >= 10 else "medium" if dependents else "low",
+    }
+
+
 def explain_file(root: Path, path: str) -> dict[str, object]:
     path = path.removeprefix("./")
     conn = connect(root)
@@ -818,3 +1021,64 @@ def file_history(root: Path, path: str) -> list[dict[str, str]]:
         {"commit": row[0][:12], "author": row[1], "subject": row[2], "date": row[3]}
         for row in rows
     ]
+
+
+def recent_changes(root: Path, limit: int = 20) -> list[dict[str, object]]:
+    conn = connect(root)
+    commits = conn.execute(
+        "SELECT hash, author, subject, committed_at FROM commits "
+        "ORDER BY committed_at DESC LIMIT ?",
+        (max(1, min(limit, 100)),),
+    ).fetchall()
+    result = []
+    for commit_hash, author, subject, committed_at in commits:
+        paths = [
+            row[0] for row in conn.execute(
+                "SELECT path FROM commit_files WHERE commit_hash=? ORDER BY path LIMIT 100",
+                (commit_hash,),
+            )
+        ]
+        result.append(
+            {
+                "commit": commit_hash[:12],
+                "author": author,
+                "subject": subject,
+                "date": committed_at,
+                "files": paths,
+            }
+        )
+    conn.close()
+    return result
+
+
+def pull_request_summary(root: Path, base: str = "origin/main") -> dict[str, object]:
+    changed = [
+        path for path in git(root, "diff", "--name-only", "-z", f"{base}...HEAD").split("\0")
+        if path
+    ]
+    conn = connect(root)
+    dependents: set[str] = set()
+    if changed:
+        placeholders = ",".join("?" for _ in changed)
+        dependents.update(
+            row[0].removeprefix("file:")
+            for row in conn.execute(
+                f"SELECT source FROM graph_edges WHERE type='DEPENDS_ON' "
+                f"AND target IN ({placeholders})",
+                tuple(f"file:{path}" for path in changed),
+            )
+        )
+    conn.close()
+    affected = sorted(set(changed) | dependents)
+    test_paths = [path for path in affected if "test" in path.lower() or "_spec." in path.lower()]
+    hotspot_paths = {item["path"] for item in hotspots(root, 100)}
+    return {
+        "base": base,
+        "changed": changed,
+        "changed_count": len(changed),
+        "affected": affected,
+        "affected_count": len(affected),
+        "tests_affected": test_paths,
+        "hotspots": sorted(set(changed) & hotspot_paths),
+        "architecture": "Change set summary is based on indexed dependency edges.",
+    }

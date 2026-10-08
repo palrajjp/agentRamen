@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 from .core import (
     GitGraphError,
     architecture,
     context_for,
+    dependency_impact,
     explain_file,
     file_history,
     graph_export,
@@ -19,7 +21,7 @@ from .core import (
 )
 
 
-def serve(root, host: str = "127.0.0.1", port: int = 8765) -> None:
+def create_server(root: Path, host: str = "127.0.0.1", port: int = 8765):
     class Handler(BaseHTTPRequestHandler):
         server_version = "GitGraph/0.1"
 
@@ -51,7 +53,7 @@ def serve(root, host: str = "127.0.0.1", port: int = 8765) -> None:
                     file_path = unquote(path.removeprefix("/api/v1/files/"))
                     value = explain_file(root, file_path)
                 elif path == "/api/v1/impact":
-                    value = explain_file(root, query.get("path", [""])[0])
+                    value = dependency_impact(root, query.get("path", [""])[0])
                 elif path == "/api/v1/history":
                     value = file_history(root, query.get("path", [""])[0])
                 elif path == "/api/v1/hotspots":
@@ -95,7 +97,11 @@ def serve(root, host: str = "127.0.0.1", port: int = 8765) -> None:
         def log_message(self, fmt, *args):
             return
 
-    server = ThreadingHTTPServer((host, port), Handler)
+    return ThreadingHTTPServer((host, port), Handler)
+
+
+def serve(root: Path, host: str = "127.0.0.1", port: int = 8765) -> None:
+    server = create_server(root, host, port)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

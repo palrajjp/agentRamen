@@ -5,19 +5,24 @@ import json
 import sys
 from pathlib import Path
 
+from .benchmark import run_benchmark
 from .core import (
     GitGraphError,
     architecture,
     architecture_at,
     connect,
     context_for,
+    dependency_impact,
     explain_file,
+    find_dependencies,
     file_history,
     find_root,
     git,
     graph_export,
     hotspots,
     index_repository,
+    pull_request_summary,
+    recent_changes,
     repo_search,
     repository_status,
 )
@@ -67,15 +72,25 @@ def _init(root: Path) -> dict[str, object]:
 
 
 def _impact(root: Path, target: str) -> dict[str, object]:
-    report = explain_file(root, target)
-    return {
-        "target": target,
-        "direct_dependents": report["dependents"],
-        "dependencies": report["dependencies"],
-        "co_changes": report["co_changes"],
-        "history": report["history"],
-        "estimated_impact": len(report["dependents"]),
-    }
+    return dependency_impact(root, target)
+
+
+def _diff(root: Path, commit1: str, commit2: str) -> list[dict[str, str]]:
+    fields = git(root, "diff", "--name-status", "-M", "-z", commit1, commit2).split("\0")
+    changes = []
+    index = 0
+    while index < len(fields) and fields[index]:
+        status = fields[index]
+        index += 1
+        if status.startswith(("R", "C")) and index + 1 < len(fields):
+            changes.append(
+                {"status": status, "previous_path": fields[index], "path": fields[index + 1]}
+            )
+            index += 2
+        elif index < len(fields):
+            changes.append({"status": status, "path": fields[index]})
+            index += 1
+    return changes
 
 
 def _mcp(root: Path) -> None:
@@ -151,6 +166,32 @@ def _mcp(root: Path) -> None:
             "description": "Export the indexed nodes and relationships.",
             "inputSchema": {"type": "object", "properties": {}},
         },
+        {
+            "name": "repo_dependencies",
+            "description": "List files directly depended on by a target file.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"],
+            },
+        },
+        {
+            "name": "repo_tests",
+            "description": "Find tests and affected files for a target file.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"],
+            },
+        },
+        {
+            "name": "repo_changes",
+            "description": "Show the latest indexed commits and changed files.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"limit": {"type": "integer"}},
+            },
+        },
     ]
     for line in sys.stdin:
         message = {}
@@ -191,6 +232,12 @@ def _mcp(root: Path) -> None:
                     value = hotspots(root, int(args.get("limit", 20)))
                 elif name == "repo_graph":
                     value = graph_export(root)
+                elif name == "repo_dependencies":
+                    value = find_dependencies(root, args.get("path", ""))
+                elif name == "repo_tests":
+                    value = dependency_impact(root, args.get("path", ""))
+                elif name == "repo_changes":
+                    value = recent_changes(root, int(args.get("limit", 20)))
                 else:
                     raise GitGraphError(f"Unknown MCP tool: {name}")
                 result = {
@@ -244,6 +291,15 @@ def main(argv: list[str] | None = None) -> int:
     diff.add_argument("commit1")
     diff.add_argument("commit2")
     diff.add_argument("--json", action="store_true")
+    changes = subparsers.add_parser("changes", help="Show recent commits and changed paths")
+    changes.add_argument("--limit", type=int, default=20)
+    changes.add_argument("--json", action="store_true")
+    pr = subparsers.add_parser("pr", help="Summarize changes against a base revision")
+    pr.add_argument("--base", default="origin/main")
+    pr.add_argument("--json", action="store_true")
+    benchmark = subparsers.add_parser("benchmark", help="Measure indexing and retrieval locally")
+    benchmark.add_argument("--files", nargs="+", type=int, default=[10, 1000])
+    benchmark.add_argument("--json", action="store_true")
     serve = subparsers.add_parser("serve", help="Start the local versioned HTTP API")
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8765)
@@ -273,11 +329,13 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "export":
             value = graph_export(root)
         elif args.command == "diff":
-            value = [
-                {"status": line[:1], "path": line[1:].strip()}
-                for line in git(root, "diff", "--name-status", args.commit1, args.commit2).splitlines()
-                if len(line) >= 2
-            ]
+            value = _diff(root, args.commit1, args.commit2)
+        elif args.command == "changes":
+            value = recent_changes(root, args.limit)
+        elif args.command == "pr":
+            value = pull_request_summary(root, args.base)
+        elif args.command == "benchmark":
+            value = [run_benchmark(count) for count in args.files]
         elif args.command == "serve":
             from .server import serve as serve_api
 

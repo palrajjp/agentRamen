@@ -16,7 +16,7 @@ agentRamen indexes source structure and Git history into a local SQLite graph, t
 Install agentRamen, then run it from the repository you want to explore:
 
 ```bash
-python -m pip install git+https://github.com/palrajjp/agentRamen.git
+python -m pip install agentramen
 cd /path/to/your/repository
 agentramen init
 agentramen context "Add authentication" --budget 2000
@@ -71,11 +71,19 @@ agentRamen's default installation runs locally with no runtime dependencies. Pyt
 Requires Python 3.10+ and Git.
 
 ```bash
-python -m pip install .
+python -m pip install agentramen
 cd /path/to/a/git/repository
 agentramen init
 agentramen context "Add authentication"
 ```
+
+## Publishing releases
+
+Configure a PyPI trusted publisher for `palrajjp/agentRamen`, using the
+`.github/workflows/publish.yml` workflow and the `pypi` environment. To publish
+a release, update the version in `pyproject.toml`, create a matching `v`-prefixed
+Git tag, and publish a GitHub release for that tag. The workflow builds the
+distributions and publishes them to PyPI using OIDC trusted publishing.
 
 Optional extras enable structured parsing for additional languages and local semantic retrieval:
 

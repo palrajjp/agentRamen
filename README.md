@@ -105,7 +105,7 @@ ignore:
 
 `semantic.enabled: true` opts into local embedding generation and semantic context ranking; install `agentramen[semantic]` first. `semantic.model` selects a FastEmbed model. `agentramen[treesitter]` opts into Tree-sitter-based parsing for supported non-Python languages; without it, or if a grammar is unavailable, agentRamen falls back to regex analysis.
 
-`context.tokenizer_model` optionally selects a model supported by `tiktoken` for tokenizer-based context budgets; install `agentramen[tokenizer]` to use it. The tokenizer vocabulary may be downloaded and cached on first use, then counting runs locally. Leave it empty to use the dependency-free approximate character-based fallback. Context responses identify `token_count_method` (`tiktoken` or `approximate`) and the tokenizer model when configured. The reported total counts the compact serialized `files` payload (the retrieved context), using the same method as selection and budgeting; per-file counts are provided as `estimated_tokens`.
+`context.tokenizer_model` optionally selects a model supported by `tiktoken` for tokenizer-based context budgets; install `agentramen[tokenizer]` to use it. The tokenizer vocabulary may be downloaded and cached on first use, then counting runs locally. Leave it empty to use the dependency-free approximate character-based fallback. Context responses identify `token_count_method` (`tiktoken` or `approximate`) and the tokenizer model when configured. The reported total budgets the selected files, team memories, and path/digest/commit evidence together; per-file counts are provided as `estimated_tokens`.
 
 ## Commands
 
@@ -241,7 +241,7 @@ Custom GPTs cannot start a developer's local stdio process. A GPT Action or host
 
 ## MCP
 
-Run `agentramen mcp` from a repository and configure your MCP-compatible agent to launch that command in the repository working directory. Tools include `repo_context`, `repo_status`, `repo_history`, `repo_search`, `repo_explain`, `repo_impact`, `repo_dependencies`, `repo_tests`, `repo_changes`, `repo_architecture`, `repo_hotspots`, `repo_graph`, `repo_stage_memory`, `repo_review_queue`, `repo_approve_memory`, `repo_reject_memory`, `repo_publish_memory`, and `repo_team_memory_search`. The stdio server needs no API keys and does not access a network service.
+Run `agentramen mcp` from a repository and configure your MCP-compatible agent to launch that command in the repository working directory. Tools include `repo_context`, `repo_status`, `repo_history`, `repo_search`, `repo_explain`, `repo_impact`, `repo_dependencies`, `repo_tests`, `repo_changes`, `repo_architecture`, `repo_hotspots`, `repo_graph`, `repo_stage_memory`, `repo_review_queue`, `repo_approve_memory`, `repo_reject_memory`, `repo_publish_memory`, `repo_team_memory_search`, and `repo_memory_audit`. The stdio server needs no API keys and does not access a network service.
 
 ## Local HTTP API
 
@@ -271,16 +271,17 @@ Context retrieval uses an incremental SQLite inverted index for lexical candidat
 
 AgentRamen keeps the live SQLite database private to each checkout. To share a reviewed fact, stage it, approve it, then publish it to `.agentramen-shared/memories/<id>.json`. Commit that file in a pull request so teammates can review changes, see history, and receive the update through Git. One file per memory keeps unrelated additions from colliding.
 
-MCP tools: `repo_stage_memory` creates a private pending proposal, `repo_review_queue` lists proposals, `repo_approve_memory` records human approval, and `repo_publish_memory` writes the Git-shareable file. `repo_team_memory_search` searches approved shared files after checkout or pull. Superseded facts are marked in their existing file when a newer approved fact with the same subject is published. Credential-like content is blocked from publication; still review memory content for confidential or personal data before committing. Agents should never approve or publish a memory without explicit human direction.
+MCP tools: `repo_context` returns source path, digest, and commit evidence for its selected files. A subsequent `repo_stage_memory` attaches evidence from the latest context call to the private pending proposal; review shows the evidence and whether its source bytes are still current. Approval records the Git `user.name` as reviewer (falling back to the local account name); publication preserves that reviewer, the source commit, digests, and validity window. Approval and publication reject changed evidence. Stale approved memories appear at the top of `repo_review_queue` with a `restage_with_fresh_context` action; they cannot be reapproved as current. `repo_team_memory_search` omits shared memories whose evidence is stale or missing. `repo_memory_audit` reports unique stale-memory counts, mismatched paths, source commits, and unverified local/shared records without editing shared Git files. Superseded facts are marked in their existing file when a newer approved fact with the same subject is published. Credential-like content is blocked from publication; still review memory content for confidential or personal data before committing. Agents should never approve or publish a memory without explicit human direction.
 
 CLI search and publish:
 
 ```bash
 agentramen memory search "authentication provider"
 agentramen memory publish <approved-memory-id>
+agentramen memory audit --json
 ```
 
-Shared memory is opt-in and version-controlled; rejected or merely staged notes stay local. Do not sync SQLite over a network share. For 100-person teams, use protected branches and normal pull-request review for shared-memory changes.
+Shared memory is opt-in and version-controlled; rejected or merely staged notes stay local. Existing memories created before source evidence was captured are reported as unverified and are not included in task context until restaged with evidence. A changed or missing source file makes linked memories stale even before `agentramen update`; refresh context and propose a new memory rather than silently treating an old fact as current. Do not sync SQLite over a network share. For 100-person teams, use protected branches and normal pull-request review for shared-memory changes.
 
 ## Centralized MCP for a shared graph
 

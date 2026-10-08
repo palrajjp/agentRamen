@@ -1005,6 +1005,9 @@ def index_repository(root: Path) -> dict[str, object]:
         row[0] for row in conn.execute("SELECT path FROM files").fetchall()
     }
     conn.close()
+    from .memory import invalidate_stale_memories
+
+    stale_memories = invalidate_stale_memories(root)
     eligible_paths = {
         path for path in tracked_after if not is_ignored(path, patterns)
     }
@@ -1020,6 +1023,7 @@ def index_repository(root: Path) -> dict[str, object]:
         "excluded_files": excluded_files,
         "ignored_files": ignored_files,
         "not_indexed_files": unclassified,
+        "stale_memories": stale_memories,
     }
 
 
@@ -1032,6 +1036,16 @@ def repository_status(root: Path) -> dict[str, object]:
     ).fetchall()
     latest = conn.execute("SELECT value FROM metadata WHERE key='last_commit'").fetchone()
     commits = conn.execute("SELECT COUNT(*) FROM commits").fetchone()[0]
+    stale_memories = conn.execute(
+        "SELECT COUNT(*) FROM memory_nodes WHERE epistemic_status='STALE'"
+    ).fetchone()[0]
+    unverified_memories = conn.execute(
+        "SELECT COUNT(*) FROM memory_nodes m WHERE m.epistemic_status IN "
+        "('ACTIVE', 'VERIFIED', 'INFERRED') AND (NOT EXISTS "
+        "(SELECT 1 FROM memory_evidence e WHERE e.memory_id=m.id) OR NOT EXISTS "
+        "(SELECT 1 FROM staged_memories s WHERE s.id=m.id "
+        "AND s.reviewed_by IS NOT NULL AND s.reviewed_by != ''))"
+    ).fetchone()[0]
     excluded_files = [
         {"path": path, "reason": reason}
         for path, reason in conn.execute(
@@ -1063,6 +1077,8 @@ def repository_status(root: Path) -> dict[str, object]:
         "excluded_files": excluded_files,
         "ignored_files": ignored_files,
         "not_indexed_files": not_indexed,
+        "stale_memories": stale_memories,
+        "unverified_memories": unverified_memories,
     }
 
 
@@ -1439,12 +1455,9 @@ def context_for(root: Path, task: str, budget: int | None = None) -> dict[str, o
     from .retriever.context import context_for as retrieve_context
 
     result = retrieve_context(root, task, budget)
-    from .memory import search_shared_memories
+    from .memory import capture_memory_evidence, search_shared_memories
 
     matches = search_shared_memories(root, task, limit=20)
-    if not matches:
-        return result
-
     config = load_config(root)
     token_budget = int(result["token_budget"])
     memory_budget = min(token_budget, max(100, token_budget // 4))
@@ -1463,6 +1476,8 @@ def context_for(root: Path, task: str, budget: int | None = None) -> dict[str, o
                 "valid_to",
                 "importance_score",
                 "path",
+                "evidence",
+                "approved_by",
             )
         }
         candidate = [*selected_memories, memory]
@@ -1473,16 +1488,57 @@ def context_for(root: Path, task: str, budget: int | None = None) -> dict[str, o
 
     compact_files: list[dict[str, object]] = []
     selected_files: list[dict[str, object]] = []
-    for item in result["files"]:
-        compact = {key: value for key, value in item.items() if key != "estimated_tokens"}
-        candidate = [*compact_files, compact]
-        total = _count_context_tokens(
-            {"files": candidate, "team_memories": selected_memories},
-            config.tokenizer_model,
+    evidence_by_path = {
+        str(item["path"]): item
+        for item in capture_memory_evidence(
+            root, [str(item["path"]) for item in result["files"]]
         )
+    }
+    selected_evidence: list[dict[str, str]] = []
+    for item in result["files"]:
+        candidate_item = dict(item)
+        evidence = evidence_by_path.get(str(item["path"]))
+        candidate_evidence = list(selected_evidence)
+        if evidence is not None:
+            candidate_evidence.append(evidence)
+
+        def candidate_size(candidate_file: dict[str, object]) -> int:
+            compact = {
+                key: value for key, value in candidate_file.items()
+                if key != "estimated_tokens"
+            }
+            return _count_context_tokens(
+                {
+                    "files": [*compact_files, compact],
+                    "team_memories": selected_memories,
+                    "evidence": candidate_evidence,
+                },
+                config.tokenizer_model,
+            )
+
+        total = candidate_size(candidate_item)
+        if total > token_budget and isinstance(candidate_item.get("excerpt"), str):
+            excerpt = str(candidate_item["excerpt"])
+            low, high = 0, len(excerpt)
+            best = None
+            while low <= high:
+                middle = (low + high) // 2
+                shortened = {**candidate_item, "excerpt": excerpt[:middle]}
+                if candidate_size(shortened) <= token_budget:
+                    best = shortened
+                    low = middle + 1
+                else:
+                    high = middle - 1
+            if best is not None:
+                candidate_item = best
+                total = candidate_size(candidate_item)
         if total <= token_budget:
-            compact_files.append(compact)
-            selected_files.append(item)
+            compact_files.append({
+                key: value for key, value in candidate_item.items()
+                if key != "estimated_tokens"
+            })
+            selected_files.append(candidate_item)
+            selected_evidence = candidate_evidence
 
     result["files_avoided"] = int(result["files_avoided"]) + len(result["files"]) - len(selected_files)
     result["files"] = [
@@ -1494,8 +1550,13 @@ def context_for(root: Path, task: str, budget: int | None = None) -> dict[str, o
     ]
     result["team_memories"] = selected_memories
     result["team_memories_avoided"] = len(matches) - len(selected_memories)
+    result["evidence"] = selected_evidence
     result["estimated_tokens"] = _count_context_tokens(
-        {"files": compact_files, "team_memories": selected_memories},
+        {
+            "files": compact_files,
+            "team_memories": selected_memories,
+            "evidence": selected_evidence,
+        },
         config.tokenizer_model,
     )
     result["confidence"] = (

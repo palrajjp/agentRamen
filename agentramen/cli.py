@@ -31,6 +31,7 @@ from .core import (
 )
 from .memory import (
     approve_memory,
+    memory_audit,
     publish_shared_memory,
     reject_memory,
     review_queue,
@@ -110,7 +111,7 @@ def _mcp(root: Path) -> None:
     tools = [
         {
             "name": "repo_context",
-            "description": "Retrieve compact repository context for a coding task.",
+            "description": "Retrieve budgeted repository context with path, digest, and source-commit evidence.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -207,7 +208,7 @@ def _mcp(root: Path) -> None:
         },
         {
             "name": "repo_review_queue",
-            "description": "List staged repository memories awaiting review.",
+            "description": "List pending memory proposals and stale approved memories that need fresh context.",
             "inputSchema": {
                 "type": "object",
                 "properties": {"limit": {"type": "integer", "default": 50}},
@@ -215,7 +216,7 @@ def _mcp(root: Path) -> None:
         },
         {
             "name": "repo_stage_memory",
-            "description": "Stage a private memory proposal for human review; it is not shared until approved and published.",
+            "description": "Stage a private proposal using evidence from the latest repo_context call; it is not shared until approved and published.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -266,6 +267,11 @@ def _mcp(root: Path) -> None:
             },
         },
         {
+            "name": "repo_memory_audit",
+            "description": "Audit local and Git-shared memories for stale or missing source evidence.",
+            "inputSchema": {"type": "object", "properties": {}},
+        },
+        {
             "name": "repo_reject_memory",
             "description": "Reject a staged repository memory.",
             "inputSchema": {
@@ -278,6 +284,7 @@ def _mcp(root: Path) -> None:
             },
         },
     ]
+    last_context_evidence: list[dict[str, str]] = []
     for line in sys.stdin:
         message = {}
         try:
@@ -306,6 +313,7 @@ def _mcp(root: Path) -> None:
                         args.get("task", ""),
                         int(token_budget) if token_budget is not None else None,
                     )
+                    last_context_evidence = list(value.get("evidence", []))
                 elif name == "repo_status":
                     value = repository_status(root)
                 elif name == "repo_history":
@@ -339,6 +347,7 @@ def _mcp(root: Path) -> None:
                             category=str(args.get("category", "context")),
                             source=(str(args["source"]) if args.get("source") is not None else None),
                             importance_score=float(args.get("importance_score", 0.5)),
+                            evidence=last_context_evidence,
                         ),
                         "status": "pending_review",
                         "shared": False,
@@ -359,6 +368,8 @@ def _mcp(root: Path) -> None:
                     value = search_shared_memories(
                         root, str(args.get("query", "")), int(args.get("limit", 10))
                     )
+                elif name == "repo_memory_audit":
+                    value = memory_audit(root)
                 else:
                     raise AgentRamenError(f"Unknown MCP tool: {name}")
                 result = {
@@ -440,6 +451,10 @@ def main(argv: list[str] | None = None) -> int:
     memory_search.add_argument("query")
     memory_search.add_argument("--limit", type=int, default=10)
     memory_search.add_argument("--json", action="store_true")
+    memory_audit_parser = memory_actions.add_parser(
+        "audit", help="Report stale, current, and unverified memories"
+    )
+    memory_audit_parser.add_argument("--json", action="store_true")
     snapshot = subparsers.add_parser("snapshot", help="Export a sanitized central-service snapshot")
     snapshot_actions = snapshot.add_subparsers(dest="snapshot_action", required=True)
     snapshot_export = snapshot_actions.add_parser("export", help="Export the current indexed Git revision")
@@ -558,8 +573,10 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "memory":
             if args.memory_action == "publish":
                 value = publish_shared_memory(root, args.memory_id)
-            else:
+            elif args.memory_action == "search":
                 value = search_shared_memories(root, args.query, args.limit)
+            else:
+                value = memory_audit(root)
         elif args.command == "snapshot":
             if args.snapshot_action == "export":
                 value = export_snapshot(root, args.repository_id, args.output)

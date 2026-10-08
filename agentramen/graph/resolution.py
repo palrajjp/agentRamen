@@ -6,7 +6,9 @@ import sqlite3
 from datetime import datetime, timezone
 
 
-EPISTEMIC_STATUSES = frozenset({"ACTIVE", "SUPERSEDED", "VERIFIED", "INFERRED"})
+EPISTEMIC_STATUSES = frozenset(
+    {"ACTIVE", "SUPERSEDED", "VERIFIED", "INFERRED", "STALE"}
+)
 
 
 def utc_timestamp(value: datetime | None = None) -> str:
@@ -29,7 +31,7 @@ def activate_memory(
     valid_from: str | None = None,
 ) -> None:
     """Insert a memory and supersede older, conflicting facts with the same subject."""
-    if epistemic_status not in EPISTEMIC_STATUSES - {"SUPERSEDED"}:
+    if epistemic_status not in {"ACTIVE", "VERIFIED", "INFERRED"}:
         raise ValueError("New memories must be ACTIVE, VERIFIED, or INFERRED.")
     if not 0.0 <= importance_score <= 1.0:
         raise ValueError("importance_score must be between 0 and 1.")

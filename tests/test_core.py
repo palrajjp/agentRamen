@@ -15,6 +15,8 @@ from agentramen.cli import _init
 from agentramen.indexer.noise_filter import filter_noise
 from agentramen.memory import (
     approve_memory,
+    capture_memory_evidence,
+    memory_audit,
     publish_shared_memory,
     reject_memory,
     review_queue,
@@ -99,6 +101,64 @@ class AgentRamenIndexTests(unittest.TestCase):
         )
         conn.close()
 
+    def test_memory_evidence_schema_migrates_existing_database(self):
+        import sqlite3
+
+        from agentramen.models.schema_patches import apply_schema_patches
+
+        conn = sqlite3.connect(":memory:")
+        conn.execute("CREATE TABLE metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        conn.execute(
+            "CREATE TABLE staged_memories ("
+            "id TEXT PRIMARY KEY, subject TEXT NOT NULL, content TEXT NOT NULL, "
+            "category TEXT NOT NULL DEFAULT 'context', source TEXT, intent_vector TEXT, "
+            "importance_score REAL NOT NULL DEFAULT 0.5, status TEXT NOT NULL DEFAULT 'pending', "
+            "created_at TEXT NOT NULL, reviewed_at TEXT, review_note TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE memory_nodes ("
+            "id TEXT PRIMARY KEY, subject TEXT NOT NULL, content TEXT NOT NULL, "
+            "category TEXT NOT NULL DEFAULT 'context', source TEXT, "
+            "epistemic_status TEXT NOT NULL DEFAULT 'ACTIVE' "
+            "CHECK (epistemic_status IN ('ACTIVE', 'SUPERSEDED', 'VERIFIED', 'INFERRED')), "
+            "valid_from TEXT NOT NULL, valid_to TEXT, importance_score REAL NOT NULL DEFAULT 0.5)"
+        )
+        conn.execute(
+            "INSERT INTO memory_nodes(id, subject, content, epistemic_status, valid_from) "
+            "VALUES ('existing', 'existing fact', 'Preserve this', 'VERIFIED', '2025-01-01')"
+        )
+
+        apply_schema_patches(conn)
+        apply_schema_patches(conn)
+
+        evidence_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(memory_evidence)")
+        }
+        staged_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(staged_memories)")
+        }
+        upgraded = conn.execute(
+            "SELECT content, epistemic_status FROM memory_nodes WHERE id='existing'"
+        ).fetchone()
+        schema_version = conn.execute(
+            "SELECT value FROM metadata WHERE key='memory_schema_version'"
+        ).fetchone()[0]
+
+        self.assertEqual(
+            evidence_columns, {"memory_id", "path", "digest", "commit_hash"}
+        )
+        self.assertIn("reviewed_by", staged_columns)
+        self.assertEqual(upgraded, ("Preserve this", "VERIFIED"))
+        self.assertEqual(schema_version, "3")
+        self.assertEqual(
+            conn.execute(
+                "SELECT COUNT(*) FROM sqlite_master "
+                "WHERE type='table' AND name='memory_evidence'"
+            ).fetchone()[0],
+            1,
+        )
+        conn.close()
+
     def test_memory_review_and_temporal_supersession(self):
         first = stage_memory(
             self.root, "authentication provider", "Use AuthService", source="agent"
@@ -131,9 +191,11 @@ class AgentRamenIndexTests(unittest.TestCase):
         (self.root / "auth.py").write_text("class AuthService: pass\n", encoding="utf-8")
         self.commit("add source file")
         index_repository(self.root)
+        evidence = capture_memory_evidence(self.root, ["auth.py"])
 
         first = stage_memory(
-            self.root, "authentication provider", "Use AuthService", source="team note"
+            self.root, "authentication provider", "Use AuthService", source="team note",
+            evidence=evidence,
         )
         approve_memory(self.root, first)
         published = publish_shared_memory(self.root, first)
@@ -143,7 +205,8 @@ class AgentRamenIndexTests(unittest.TestCase):
         self.assertEqual(search_shared_memories(self.root, "authentication provider")[0]["id"], first)
 
         second = stage_memory(
-            self.root, "authentication provider", "Use OAuthProvider", source="team note"
+            self.root, "authentication provider", "Use OAuthProvider", source="team note",
+            evidence=evidence,
         )
         approve_memory(self.root, second)
         updated = publish_shared_memory(self.root, second)
@@ -157,6 +220,7 @@ class AgentRamenIndexTests(unittest.TestCase):
         self.assertEqual(context["team_memories"][0]["id"], second)
         self.assertEqual(context["team_memories"][0]["source"], "team note")
         self.assertEqual(context["team_memories"][0]["epistemic_status"], "VERIFIED")
+        self.assertEqual(context["team_memories"][0]["approved_by"], "Test User")
         self.assertIsNotNone(context["team_memories"][0]["valid_from"])
         self.assertIsNone(context["team_memories"][0]["valid_to"])
         self.assertLessEqual(context["estimated_tokens"], context["token_budget"])
@@ -176,12 +240,16 @@ class AgentRamenIndexTests(unittest.TestCase):
             self.assertEqual([item["id"] for item in teammate_results], [second])
 
     def test_shared_memory_requires_approval_and_rejects_credentials(self):
+        (self.root / "deploy.py").write_text("def deploy(): return True\n", encoding="utf-8")
+        self.commit("add deployment source")
+        index_repository(self.root)
+        evidence = capture_memory_evidence(self.root, ["deploy.py"])
         pending = stage_memory(self.root, "deployment rule", "Use signed artifacts")
         with self.assertRaisesRegex(AgentRamenError, "approved"):
             publish_shared_memory(self.root, pending)
 
         credential = stage_memory(
-            self.root, "deployment key", "api_key = 'Abcdefghijklmnop'"
+            self.root, "deployment key", "api_key = 'Abcdefghijklmnop'", evidence=evidence
         )
         approve_memory(self.root, credential)
         with self.assertRaisesRegex(AgentRamenError, "credential-like"):
@@ -192,10 +260,107 @@ class AgentRamenIndexTests(unittest.TestCase):
             "deployment provenance",
             "Use the approved deployment pipeline",
             source="api_key = 'Abcdefghijklmnop'",
+            evidence=evidence,
         )
         approve_memory(self.root, source_credential)
         with self.assertRaisesRegex(AgentRamenError, "credential-like"):
             publish_shared_memory(self.root, source_credential)
+
+    def test_memory_evidence_stales_and_audit_reports_provenance(self):
+        import io
+
+        from agentramen.cli import main
+
+        (self.root / "deploy.py").write_text("def deploy(): return True\n", encoding="utf-8")
+        self.commit("add deployment source")
+        index_repository(self.root)
+        evidence = capture_memory_evidence(self.root, ["deploy.py"])
+        memory_id = stage_memory(
+            self.root,
+            "deployment invariant",
+            "Deploy only signed artifacts",
+            evidence=evidence,
+        )
+        queued = review_queue(self.root)[0]
+        self.assertTrue(queued["evidence_current"])
+        self.assertEqual(queued["evidence"][0]["commit"], evidence[0]["commit"])
+        approve_memory(self.root, memory_id)
+        publish_shared_memory(self.root, memory_id)
+
+        pending_id = stage_memory(
+            self.root, "deployment check", "Verify artifact signatures", evidence=evidence
+        )
+        unverified_id = stage_memory(
+            self.root, "legacy local note", "Review before relying on this note"
+        )
+        approve_memory(self.root, unverified_id)
+        (self.root / "deploy.py").write_text("def deploy(): return unsigned()\n", encoding="utf-8")
+        self.commit("change deployment implementation")
+        index_result = index_repository(self.root)
+        invalidated = next(
+            item for item in index_result["stale_memories"] if item["id"] == memory_id
+        )
+        self.assertEqual(
+            invalidated["checked_against_commit"],
+            subprocess.check_output(
+                ["git", "-C", str(self.root), "rev-parse", "HEAD"], text=True
+            ).strip(),
+        )
+        audit = memory_audit(self.root)
+        self.assertEqual([item["id"] for item in audit["stale_local"]], [memory_id])
+        self.assertEqual(audit["stale_local"][0]["evidence"][0]["path"], "deploy.py")
+        self.assertEqual(audit["stale_local"][0]["stale_paths"], ["deploy.py"])
+        self.assertEqual(audit["stale_shared"][0]["id"], memory_id)
+        self.assertEqual(audit["stale_shared"][0]["stale_paths"], ["deploy.py"])
+        self.assertEqual(audit["unverified_local"][0]["id"], unverified_id)
+        self.assertEqual(repository_status(self.root)["unverified_memories"], 1)
+        self.assertEqual(search_shared_memories(self.root, "deployment invariant"), [])
+        queue = review_queue(self.root)
+        stale_review = next(item for item in queue if item["id"] == memory_id)
+        self.assertEqual(stale_review["status"], "stale")
+        self.assertEqual(stale_review["action"], "restage_with_fresh_context")
+        self.assertEqual(stale_review["evidence"][0]["commit"], evidence[0]["commit"])
+        self.assertFalse(stale_review["evidence_current"])
+        with self.assertRaisesRegex(AgentRamenError, "evidence is stale"):
+            approve_memory(self.root, pending_id)
+
+        output = io.StringIO()
+        with patch("agentramen.cli.find_root", return_value=self.root), patch(
+            "sys.stdout", output
+        ):
+            self.assertEqual(main(["memory", "audit", "--json"]), 0)
+        cli_audit = json.loads(output.getvalue())
+        self.assertEqual(cli_audit["stale_count"], 1)
+        self.assertEqual(cli_audit["index_commit"], invalidated["checked_against_commit"])
+        self.assertIn("1 memory is suspect", cli_audit["summary"])
+
+    def test_legacy_shared_memory_is_unverified_and_not_searchable(self):
+        import uuid
+
+        memory_id = str(uuid.uuid4())
+        directory = self.root / ".agentramen-shared" / "memories"
+        directory.mkdir(parents=True)
+        (directory / f"{memory_id}.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "id": memory_id,
+                    "subject": "legacy deployment rule",
+                    "content": "Use the old deployment path",
+                    "category": "context",
+                    "source": "older release",
+                    "epistemic_status": "VERIFIED",
+                    "valid_from": "2025-01-01T00:00:00+00:00",
+                    "valid_to": None,
+                    "importance_score": 0.5,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        self.assertEqual(search_shared_memories(self.root, "legacy deployment"), [])
+        audit = memory_audit(self.root)
+        self.assertEqual(audit["unverified_shared"][0]["id"], memory_id)
 
     def test_central_snapshot_excludes_private_memory_and_includes_shared_memory(self):
         import zipfile
@@ -213,8 +378,10 @@ class AgentRamenIndexTests(unittest.TestCase):
         private_sentinel = "AGENTRAMEN_PRIVATE_MEMORY_SENTINEL_7fc5a31d"
         private_id = stage_memory(self.root, "personal note", private_sentinel)
         approve_memory(self.root, private_id)
+        evidence = capture_memory_evidence(self.root, ["auth.py"])
         shared_id = stage_memory(
-            self.root, "authentication provider", "Use OAuthProvider", source="reviewed team note"
+            self.root, "authentication provider", "Use OAuthProvider", source="reviewed team note",
+            evidence=evidence,
         )
         approve_memory(self.root, shared_id)
         publish_shared_memory(self.root, shared_id)
@@ -671,7 +838,12 @@ class AgentRamenIndexTests(unittest.TestCase):
                 for item in context["files"]
             ]
             expected = _count_context_tokens(
-                {"files": content}, "test-model"
+                {
+                    "files": content,
+                    "team_memories": context["team_memories"],
+                    "evidence": context["evidence"],
+                },
+                "test-model",
             )
             self.assertEqual(context["token_count_method"], "tiktoken")
             self.assertEqual(context["tokenizer_model"], "test-model")
@@ -696,7 +868,12 @@ class AgentRamenIndexTests(unittest.TestCase):
             for item in context["files"]
         ]
         expected = _count_context_tokens(
-            {"files": content}, ""
+            {
+                "files": content,
+                "team_memories": context["team_memories"],
+                "evidence": context["evidence"],
+            },
+            "",
         )
         self.assertEqual(context["token_count_method"], "approximate")
         self.assertIsNone(context["tokenizer_model"])
@@ -732,9 +909,14 @@ class AgentRamenIndexTests(unittest.TestCase):
             {key: value for key, value in item.items() if key != "estimated_tokens"}
             for item in context["files"]
         ]
+        payload = {
+            "files": content,
+            "team_memories": context["team_memories"],
+            "evidence": context["evidence"],
+        }
         self.assertEqual(
             context["estimated_tokens"],
-            len(json.dumps({"files": content}, ensure_ascii=False, separators=(",", ":"))),
+            len(json.dumps(payload, ensure_ascii=False, separators=(",", ":"))),
         )
         self.assertEqual(context["token_count_method"], "tiktoken")
         _TOKENIZERS.pop(model, None)
@@ -870,6 +1052,7 @@ class AgentRamenIndexTests(unittest.TestCase):
         )
         (self.root / "auth.py").write_text("class AuthService:\n    pass\n", encoding="utf-8")
         self.commit("add auth")
+        index_repository(self.root)
         requests = [
             {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
             {"jsonrpc": "2.0", "method": "notifications/initialized"},
@@ -925,12 +1108,17 @@ class AgentRamenIndexTests(unittest.TestCase):
         self.assertIn("repo_reject_memory", tools)
         self.assertIn("repo_publish_memory", tools)
         self.assertIn("repo_team_memory_search", tools)
+        self.assertIn("repo_memory_audit", tools)
         context = results_by_id[3]["result"]["structuredContent"]
         self.assertEqual(context["token_budget"], 350)
+        self.assertTrue(context["evidence"])
         staged = results_by_id[4]["result"]["structuredContent"]
         memory_id = staged["id"]
         self.assertEqual(staged["shared"], False)
-        self.assertEqual(results_by_id[5]["result"]["structuredContent"][0]["id"], memory_id)
+        reviewed = results_by_id[5]["result"]["structuredContent"][0]
+        self.assertEqual(reviewed["id"], memory_id)
+        self.assertTrue(reviewed["evidence_current"])
+        self.assertEqual(reviewed["evidence"][0]["commit"], context["evidence"][0]["commit"])
 
         publish_requests = [
             {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
@@ -955,6 +1143,12 @@ class AgentRamenIndexTests(unittest.TestCase):
                     "arguments": {"query": "OAuthProvider"},
                 },
             },
+            {
+                "jsonrpc": "2.0",
+                "id": 5,
+                "method": "tools/call",
+                "params": {"name": "repo_memory_audit", "arguments": {}},
+            },
         ]
         publish_response = subprocess.run(
             [sys.executable, "-c", import_code],
@@ -971,6 +1165,9 @@ class AgentRamenIndexTests(unittest.TestCase):
         self.assertEqual(published[2]["result"]["structuredContent"]["status"], "approved")
         self.assertEqual(published[3]["result"]["structuredContent"]["status"], "published")
         self.assertEqual(published[4]["result"]["structuredContent"][0]["id"], memory_id)
+        self.assertEqual(
+            published[5]["result"]["structuredContent"]["current_shared_count"], 1
+        )
 
     def test_graph_tracks_imports_calls_and_history(self):
         (self.root / "auth.py").write_text(

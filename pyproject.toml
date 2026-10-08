@@ -3,13 +3,13 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "gitgraph"
+name = "agentramen"
 version = "0.1.0"
 description = "Local-first repository intelligence and task context for coding agents"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
-authors = [{ name = "GitGraph contributors" }]
+authors = [{ name = "agentRamen contributors" }]
 keywords = ["git", "code-intelligence", "repository-analysis", "coding-agents", "mcp"]
 classifiers = [
 	"Development Status :: 3 - Alpha",
@@ -25,9 +25,9 @@ classifiers = [
 dependencies = []
 
 [project.urls]
-Homepage = "https://github.com/palrajjp/gitGraph"
-Repository = "https://github.com/palrajjp/gitGraph"
-Issues = "https://github.com/palrajjp/gitGraph/issues"
+Homepage = "https://github.com/palrajjp/agentRamen"
+Repository = "https://github.com/palrajjp/agentRamen"
+Issues = "https://github.com/palrajjp/agentRamen/issues"
 
 [project.optional-dependencies]
 treesitter = ["tree-sitter-language-pack>=1.21.0"]
@@ -35,7 +35,7 @@ semantic = ["fastembed>=0.9.0"]
 tokenizer = ["tiktoken>=0.12.0"]
 
 [project.scripts]
-gitgraph = "gitgraph.cli:main"
+agentramen = "agentramen.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["gitgraph*"]
+include = ["agentramen*"]

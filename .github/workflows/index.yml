@@ -1,4 +1,4 @@
-name: GitGraph reusable index
+name: agentRamen reusable index
 
 on:
   workflow_call:
@@ -36,45 +36,45 @@ jobs:
           fetch-depth: 0
       - uses: actions/checkout@v4
         with:
-          repository: palrajjp/gitGraph
+          repository: palrajjp/agentRamen
           ref: main
-          path: .gitgraph-action
+          path: .agentramen-action
           token: ${{ github.token }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - uses: actions/cache@v4
         with:
-          path: .gitgraph
-          key: gitgraph-${{ runner.os }}-${{ github.ref }}-${{ github.sha }}
+          path: .agentramen
+          key: agentramen-${{ runner.os }}-${{ github.ref }}-${{ github.sha }}
           restore-keys: |
-            gitgraph-${{ runner.os }}-${{ github.ref }}-
-            gitgraph-${{ runner.os }}-
+            agentramen-${{ runner.os }}-${{ github.ref }}-
+            agentramen-${{ runner.os }}-
       - name: Build repository graph
         run: |
-          python -m pip install ./.gitgraph-action
-          python -m unittest discover -s .gitgraph-action/tests -v
-          gitgraph index --json
+          python -m pip install ./.agentramen-action
+          python -m unittest discover -s .agentramen-action/tests -v
+          agentramen index --json
       - name: Build task-specific context
         if: inputs.task != ''
         env:
-          GITGRAPH_TASK: ${{ inputs.task }}
-          GITGRAPH_TOKEN_BUDGET: ${{ inputs.token_budget }}
-        run: gitgraph context "$GITGRAPH_TASK" --budget "$GITGRAPH_TOKEN_BUDGET" --json > gitgraph-context.json
+          AGENTRAMEN_TASK: ${{ inputs.task }}
+          AGENTRAMEN_TOKEN_BUDGET: ${{ inputs.token_budget }}
+        run: agentramen context "$AGENTRAMEN_TASK" --budget "$AGENTRAMEN_TOKEN_BUDGET" --json > agentramen-context.json
       - name: Upload task context
         if: inputs.task != ''
         uses: actions/upload-artifact@v4
         with:
-          name: gitgraph-context-${{ github.sha }}
-          path: gitgraph-context.json
+          name: agentramen-context-${{ github.sha }}
+          path: agentramen-context.json
           if-no-files-found: error
           retention-days: 14
       - name: Summarize pull request context
         if: github.event_name == 'pull_request'
-        run: gitgraph pr --base "${{ github.event.pull_request.base.sha }}" --json | tee -a "$GITHUB_STEP_SUMMARY"
+        run: agentramen pr --base "${{ github.event.pull_request.base.sha }}" --json | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         with:
-          name: gitgraph-${{ github.sha }}
-          path: .gitgraph/graph.db
+          name: agentramen-${{ github.sha }}
+          path: .agentramen/graph.db
           if-no-files-found: error
           retention-days: 14

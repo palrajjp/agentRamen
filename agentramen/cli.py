@@ -27,6 +27,7 @@ from .core import (
     repo_search,
     repository_status,
 )
+from .memory import approve_memory, reject_memory, review_queue
 
 def _output(value: object, as_json: bool = False) -> None:
     if as_json:
@@ -194,6 +195,42 @@ def _mcp(root: Path) -> None:
                 "properties": {"limit": {"type": "integer"}},
             },
         },
+        {
+            "name": "repo_review_queue",
+            "description": "List staged repository memories awaiting review.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"limit": {"type": "integer", "default": 50}},
+            },
+        },
+        {
+            "name": "repo_approve_memory",
+            "description": "Approve a staged memory and resolve temporal conflicts.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "epistemic_status": {
+                        "type": "string",
+                        "enum": ["VERIFIED", "ACTIVE", "INFERRED"],
+                        "default": "VERIFIED",
+                    },
+                },
+                "required": ["id"],
+            },
+        },
+        {
+            "name": "repo_reject_memory",
+            "description": "Reject a staged repository memory.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "note": {"type": "string"},
+                },
+                "required": ["id"],
+            },
+        },
     ]
     for line in sys.stdin:
         message = {}
@@ -245,6 +282,18 @@ def _mcp(root: Path) -> None:
                     value = dependency_impact(root, args.get("path", ""))
                 elif name == "repo_changes":
                     value = recent_changes(root, int(args.get("limit", 20)))
+                elif name == "repo_review_queue":
+                    value = review_queue(root, int(args.get("limit", 50)))
+                elif name == "repo_approve_memory":
+                    value = approve_memory(
+                        root,
+                        str(args.get("id", "")),
+                        str(args.get("epistemic_status", "VERIFIED")),
+                    )
+                elif name == "repo_reject_memory":
+                    value = reject_memory(
+                        root, str(args.get("id", "")), str(args.get("note", ""))
+                    )
                 else:
                     raise AgentRamenError(f"Unknown MCP tool: {name}")
                 result = {

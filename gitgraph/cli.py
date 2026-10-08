@@ -5,7 +5,7 @@ import json
 import sys
 from pathlib import Path
 
-from .benchmark import run_benchmark
+from .benchmark import run_benchmark, run_repository_benchmark
 from .core import (
     GitGraphError,
     architecture,
@@ -307,6 +307,7 @@ def main(argv: list[str] | None = None) -> int:
     pr.add_argument("--json", action="store_true")
     benchmark = subparsers.add_parser("benchmark", help="Measure indexing and retrieval locally")
     benchmark.add_argument("--files", nargs="+", type=int, default=[10, 1000])
+    benchmark.add_argument("--repository", type=Path)
     benchmark.add_argument("--json", action="store_true")
     serve = subparsers.add_parser("serve", help="Start the local versioned HTTP API")
     serve.add_argument("--host", default="127.0.0.1")
@@ -344,6 +345,8 @@ def main(argv: list[str] | None = None) -> int:
             value = pull_request_summary(root, args.base)
         elif args.command == "benchmark":
             value = [run_benchmark(count) for count in args.files]
+            if args.repository:
+                value.append(run_repository_benchmark(args.repository))
         elif args.command == "serve":
             from .server import serve as serve_api
 

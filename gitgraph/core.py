@@ -63,7 +63,7 @@ try:
     _TREE_SITTER_AVAILABLE = importlib.util.find_spec("tree_sitter_language_pack") is not None
 except ValueError:
     _TREE_SITTER_AVAILABLE = False
-INDEX_VERSION = "4-treesitter" if _TREE_SITTER_AVAILABLE else "4-regex"
+INDEX_VERSION = "5-treesitter" if _TREE_SITTER_AVAILABLE else "5-regex"
 DEFAULT_CONTEXT_BUDGET = 2000
 DEFAULT_HISTORY_COMMITS = 100
 DEFAULT_EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
@@ -287,6 +287,16 @@ def connect(root: Path) -> sqlite3.Connection:
             import_name TEXT NOT NULL,
             PRIMARY KEY(importer, import_name)
         );
+        CREATE TABLE IF NOT EXISTS file_search_terms (
+            path TEXT NOT NULL,
+            term TEXT NOT NULL,
+            path_term INTEGER NOT NULL,
+            PRIMARY KEY(path, term)
+        );
+        CREATE TABLE IF NOT EXISTS term_document_frequency (
+            term TEXT PRIMARY KEY,
+            document_frequency INTEGER NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS file_embeddings (
             path TEXT NOT NULL,
             digest TEXT NOT NULL,
@@ -300,6 +310,16 @@ def connect(root: Path) -> sqlite3.Connection:
             graph_json TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS file_imports_by_name ON file_imports(import_name);
+        CREATE INDEX IF NOT EXISTS file_search_terms_by_term
+            ON file_search_terms(term, path);
+        CREATE INDEX IF NOT EXISTS file_search_terms_by_path_term
+            ON file_search_terms(path_term, term);
+        CREATE INDEX IF NOT EXISTS commit_files_by_path
+            ON commit_files(path, commit_hash);
+        CREATE INDEX IF NOT EXISTS graph_edges_by_source_type
+            ON graph_edges(source, type, target);
+        CREATE INDEX IF NOT EXISTS graph_edges_by_target_type
+            ON graph_edges(target, type, source);
         """
     )
     file_columns = {row[1] for row in conn.execute("PRAGMA table_info(files)")}
@@ -884,6 +904,7 @@ def index_repository(root: Path) -> dict[str, int]:
             changed_graph_paths.add(path)
             updated += 1
         _sync_graph(conn, changed_graph_paths)
+        _sync_search_terms(conn, changed_graph_paths)
         _sync_cochanges(conn, config.co_changes_enabled, config.history_commits)
         conn.execute(
             "INSERT INTO metadata(key, value) VALUES('index_version', ?) "
@@ -954,6 +975,50 @@ def _terms(text: str) -> set[str]:
     return terms
 
 
+def _sync_search_terms(conn: sqlite3.Connection, changed_paths: set[str]) -> None:
+    affected_path_terms: set[str] = set()
+    for path in changed_paths:
+        affected_path_terms.update(
+            row[0] for row in conn.execute(
+                "SELECT term FROM file_search_terms WHERE path=? AND path_term=1", (path,)
+            )
+        )
+        conn.execute("DELETE FROM file_search_terms WHERE path=?", (path,))
+        row = conn.execute(
+            "SELECT symbols, imports FROM files WHERE path=?", (path,)
+        ).fetchone()
+        if row is None:
+            continue
+        path_terms = _terms(path.replace("/", " "))
+        indexed_terms = path_terms | _terms(
+            " ".join(json.loads(row[0]) + json.loads(row[1]))
+        )
+        conn.executemany(
+            "INSERT INTO file_search_terms(path, term, path_term) VALUES (?, ?, ?)",
+            [(path, term, int(term in path_terms)) for term in sorted(indexed_terms)],
+        )
+        affected_path_terms.update(path_terms)
+    for term in affected_path_terms:
+        frequency = conn.execute(
+            "SELECT COUNT(*) FROM file_search_terms WHERE term=? AND path_term=1",
+            (term,),
+        ).fetchone()[0]
+        if frequency:
+            conn.execute(
+                "INSERT INTO term_document_frequency(term, document_frequency) VALUES (?, ?) "
+                "ON CONFLICT(term) DO UPDATE SET document_frequency=excluded.document_frequency",
+                (term, frequency),
+            )
+        else:
+            conn.execute("DELETE FROM term_document_frequency WHERE term=?", (term,))
+
+
+def _batches(values: set[str] | list[str], batch_size: int = 900):
+    ordered = sorted(values)
+    for offset in range(0, len(ordered), batch_size):
+        yield ordered[offset : offset + batch_size]
+
+
 def context_for(
     root: Path, task: str, budget: int | None = None
 ) -> dict[str, object]:
@@ -962,28 +1027,38 @@ def context_for(
         budget = config.default_budget
     if budget < 100:
         raise GitGraphError("Token budget must be at least 100.")
-    conn = connect(root)
-    rows = conn.execute(
-        "SELECT path, language, bytes, symbols, imports, digest FROM files"
-    ).fetchall()
-    history = conn.execute(
-        "SELECT cf.path, c.subject, c.hash FROM commit_files cf "
-        "JOIN commits c ON c.hash=cf.commit_hash ORDER BY c.committed_at DESC"
-    ).fetchall()
-    embeddings = conn.execute(
-        "SELECT path, digest, vector FROM file_embeddings WHERE model=?",
-        (config.embedding_model,),
-    ).fetchall() if config.semantic_enabled else []
-    conn.close()
     task_terms = _terms(task)
-    frequencies = Counter(term for path, *_ in rows for term in _terms(path.replace("/", " ")))
-    digest_by_path = {row[0]: row[5] for row in rows}
+    conn = connect(root)
+    overlap_by_path: dict[str, set[str]] = {}
+    frequencies: dict[str, int] = {}
+    for batch in _batches(task_terms):
+        if not batch:
+            continue
+        placeholders = ",".join("?" for _ in batch)
+        for path, term in conn.execute(
+            f"SELECT path, term FROM file_search_terms WHERE term IN ({placeholders})",
+            batch,
+        ):
+            overlap_by_path.setdefault(path, set()).add(term)
+        frequencies.update(
+            conn.execute(
+                f"SELECT term, document_frequency FROM term_document_frequency "
+                f"WHERE term IN ({placeholders})",
+                batch,
+            ).fetchall()
+        )
+    embeddings = []
+    if config.semantic_enabled:
+        embeddings = conn.execute(
+            "SELECT e.path, e.vector FROM file_embeddings e "
+            "JOIN files f ON f.path=e.path AND f.digest=e.digest "
+            "WHERE e.model=?",
+            (config.embedding_model,),
+        ).fetchall()
     semantic_scores: dict[str, float] = {}
     if config.semantic_enabled and task.strip() and embeddings:
         query_vector = _embed_texts(config.embedding_model, ["query: " + task])[0]
-        for path, digest, raw_vector in embeddings:
-            if path not in digest_by_path or digest_by_path[path] != digest:
-                continue
+        for path, raw_vector in embeddings:
             vector = json.loads(raw_vector)
             denominator = sum(value * value for value in query_vector) ** 0.5 * sum(
                 value * value for value in vector
@@ -992,41 +1067,112 @@ def context_for(
                 semantic_scores[path] = sum(
                     left * right for left, right in zip(query_vector, vector)
                 ) / denominator
-    history_by_path: dict[str, list[tuple[str, str]]] = {}
-    for path, subject, commit_hash in history:
-        history_by_path.setdefault(path, []).append((subject, commit_hash))
+    lexical_matches = set(overlap_by_path)
+    candidate_paths = lexical_matches | {
+        path for path, similarity in semantic_scores.items() if similarity >= 0.35
+    }
+    metadata_rows = []
+    for batch in _batches(candidate_paths):
+        if not batch:
+            continue
+        placeholders = ",".join("?" for _ in batch)
+        metadata_rows.extend(
+            conn.execute(
+                f"SELECT path, language, bytes, symbols, imports, digest FROM files "
+                f"WHERE path IN ({placeholders})",
+                batch,
+            ).fetchall()
+        )
     metadata_by_path = {
         path: (language, size, json.loads(raw_symbols), json.loads(raw_imports))
-        for path, language, size, raw_symbols, raw_imports, _digest in rows
+        for path, language, size, raw_symbols, raw_imports, _digest in metadata_rows
     }
-    conn = connect(root)
-    edge_rows = conn.execute(
-        "SELECT source, target, type, weight FROM graph_edges "
-        "WHERE type IN ('DEPENDS_ON', 'CO_CHANGED_WITH')"
-    ).fetchall()
+    digest_by_path = {row[0]: row[5] for row in metadata_rows}
+
+    history: dict[str, list[tuple[str, str]]] = {}
+
+    def fetch_history(paths: set[str]) -> None:
+        for batch in _batches(paths):
+            if not batch:
+                continue
+            placeholders = ",".join("?" for _ in batch)
+            history_rows = conn.execute(
+                f"SELECT cf.path, c.subject, c.hash FROM commit_files cf "
+                f"JOIN commits c ON c.hash=cf.commit_hash "
+                f"WHERE cf.path IN ({placeholders}) ORDER BY c.committed_at DESC",
+                batch,
+            ).fetchall()
+            for path, subject, commit_hash in history_rows:
+                history.setdefault(path, []).append((subject, commit_hash))
+
+    fetch_history(candidate_paths)
+
+    relation_rows: dict[tuple[str, str, str], tuple[str, str, str, float]] = {}
+
+    def fetch_edges(paths: set[str], column: str) -> None:
+        for batch in _batches(paths):
+            if not batch:
+                continue
+            placeholders = ",".join("?" for _ in batch)
+            for row in conn.execute(
+                f"SELECT source, target, type, weight FROM graph_edges "
+                f"WHERE type IN ('DEPENDS_ON', 'CO_CHANGED_WITH') "
+                f"AND {column} IN ({placeholders})",
+                [*(f"file:{path}" for path in batch)],
+            ):
+                relation_rows[(row[0], row[1], row[2])] = row
+
+    fetch_edges(candidate_paths, "source")
+    fetch_edges(lexical_matches, "target")
+    related_source_paths = {
+        source.removeprefix("file:")
+        for source, _target, _kind in relation_rows
+        if source.removeprefix("file:") not in candidate_paths
+    }
+    fetch_edges(related_source_paths, "source")
+    fetch_history(related_source_paths)
+    for batch in _batches(related_source_paths - set(metadata_by_path)):
+        if not batch:
+            continue
+        placeholders = ",".join("?" for _ in batch)
+        metadata_rows.extend(
+            conn.execute(
+                f"SELECT path, language, bytes, symbols, imports, digest FROM files "
+                f"WHERE path IN ({placeholders})",
+                batch,
+            ).fetchall()
+        )
+    metadata_by_path = {
+        path: (language, size, json.loads(raw_symbols), json.loads(raw_imports))
+        for path, language, size, raw_symbols, raw_imports, _digest in metadata_rows
+    }
+    for row in metadata_rows:
+        digest_by_path[row[0]] = row[5]
+    total_files = conn.execute("SELECT COUNT(*) FROM files").fetchone()[0]
     conn.close()
+
+    history_by_path: dict[str, list[tuple[str, str]]] = {}
+    history_by_path.update(history)
     relations: dict[str, list[tuple[str, str, float]]] = {}
-    for source, target, kind, weight in edge_rows:
+    for source, target, kind, weight in relation_rows.values():
         source_path = source.removeprefix("file:")
         target_path = target.removeprefix("file:")
         relations.setdefault(source_path, []).append((target_path, kind, weight))
     ranked = []
-    lexical_matches: set[str] = set()
-    for path, language, size, raw_symbols, raw_imports, _digest in rows:
-        symbols = json.loads(raw_symbols)
-        imports = json.loads(raw_imports)
-        searchable = _terms(path.replace("/", " ")) | _terms(" ".join(symbols + imports))
-        overlap = searchable & task_terms
-        if not overlap:
+    for path in sorted(lexical_matches):
+        if path not in metadata_by_path:
             continue
-        lexical_matches.add(path)
-        score = sum(1 / max(1, frequencies[word]) for word in overlap)
+        language, size, symbols, imports = metadata_by_path[path]
+        overlap = overlap_by_path[path]
+        score = sum(1 / max(1, frequencies.get(word, 0)) for word in overlap)
         score += min(len(history_by_path.get(path, [])), 5) * 0.08
         score += max(0.0, semantic_scores.get(path, 0.0)) * 0.5
         ranked.append((score, path, language, size, symbols, imports))
     ranked_paths = {row[1] for row in ranked}
     for path, similarity in semantic_scores.items():
         if path in ranked_paths or similarity < 0.35:
+            continue
+        if path not in metadata_by_path:
             continue
         language, size, symbols, imports = metadata_by_path[path]
         ranked.append((max(0.0, similarity) * 0.5, path, language, size, symbols, imports))
@@ -1119,7 +1265,7 @@ def context_for(
         "files": selected,
         "estimated_tokens": used_tokens,
         "token_budget": budget,
-        "files_avoided": max(0, len(rows) - len(selected)),
+        "files_avoided": max(0, total_files - len(selected)),
         "confidence": "high" if len(selected) >= 3 else "medium" if selected else "low",
     }
 

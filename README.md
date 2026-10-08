@@ -130,7 +130,7 @@ Run `gitgraph mcp` from a repository and configure your MCP-compatible agent to 
 
 ## Benchmarking
 
-Run `gitgraph benchmark --files 10 1000` to measure synthetic initial indexing, a one-file incremental update, and context retrieval on the current machine. The command reports the measured numbers for that run; it does not claim they generalize to other repositories or systems.
+Run `gitgraph benchmark --files 10 1000` to measure synthetic initial indexing, a one-file incremental update, and context retrieval. Add `--repository /path/to/repo` to measure a temporary copy of a real repository's tracked working-tree files as well. Output includes lexical candidate count and database size. Results are local measurements, not cross-machine guarantees.
 
 ## Privacy and exclusions
 
@@ -140,7 +140,7 @@ The index stays in `.gitgraph/graph.db` on the local machine or in the configure
 
 Tree-sitter parsing, semantic embeddings, the local web UI, and cached commit-addressable graph snapshots are implemented. Tree-sitter and semantic retrieval are optional extras; parsing falls back to regex where needed. Import resolution supports common file/module layouts, not every workspace alias or language-specific build system. Historical indexing retains at most 100 commits by default; PR architecture assessment is based on indexed dependency edges rather than semantic boundary rules. Context token estimates are not measured with a model tokenizer, and benchmark outputs must be measured locally rather than treated as performance guarantees.
 
-Context retrieval currently scans indexed file metadata and loads relevant history and graph relationships for each request, so its work grows with repository size. A scalable follow-up is to maintain an incremental SQLite term-to-file inverted index, retrieve history and graph edges only for lexical/semantic candidate files, and keep ranking bounded to those candidates. If semantic search becomes a bottleneck, replace its exact all-embedding comparison with an optional approximate-nearest-neighbor index. These changes should be benchmarked against full scans on representative repositories and checked for ranking parity before becoming the default.
+Lexical context retrieval uses an incremental SQLite inverted index over paths, symbols, and imports, along with indexed document frequencies. History and graph relationships are queried only for lexical/semantic candidates and their relevant neighbors, rather than scanning all indexed rows and edges. Ranking is covered by parity tests against the former full-scan behavior. When semantic retrieval is enabled, exact similarity still evaluates stored embeddings; consider an optional approximate-nearest-neighbor index only if repository benchmarks show this is a bottleneck.
 
 ## Development
 

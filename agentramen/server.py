@@ -21,6 +21,7 @@ from .core import (
     repo_search,
     repository_status,
 )
+from .memory import approve_memory, reject_memory, review_queue, stage_memory
 
 WEB_UI = r"""<!doctype html>
 <html lang="en">
@@ -171,6 +172,8 @@ def create_server(root: Path, host: str = "127.0.0.1", port: int = 8765):
                     value = file_history(root, query.get("path", [""])[0])
                 elif path == "/api/v1/hotspots":
                     value = hotspots(root)
+                elif path == "/api/v1/memories/review-queue":
+                    value = review_queue(root, int(query.get("limit", ["50"])[0]))
                 else:
                     self._respond(404, {"error": "Not found"})
                     return
@@ -201,6 +204,42 @@ def create_server(root: Path, host: str = "127.0.0.1", port: int = 8765):
                 elif path == "/api/v1/search":
                     value = repo_search(
                         root, str(request.get("query", "")), int(request.get("limit", 20))
+                    )
+                elif path == "/api/v1/memories":
+                    intent_vector = request.get("intent_vector")
+                    if intent_vector is not None and (
+                        not isinstance(intent_vector, list)
+                        or any(
+                            not isinstance(value, (int, float)) or isinstance(value, bool)
+                            for value in intent_vector
+                        )
+                    ):
+                        raise ValueError("intent_vector must be a list of numbers")
+                    value = {
+                        "id": stage_memory(
+                            root,
+                            str(request.get("subject", "")),
+                            str(request.get("content", "")),
+                            category=str(request.get("category", "context")),
+                            source=(
+                                str(request["source"])
+                                if request.get("source") is not None
+                                else None
+                            ),
+                            intent_vector=intent_vector,
+                            importance_score=float(request.get("importance_score", 0.5)),
+                        ),
+                        "status": "pending",
+                    }
+                elif path == "/api/v1/memories/approve":
+                    value = approve_memory(
+                        root,
+                        str(request.get("id", "")),
+                        str(request.get("epistemic_status", "VERIFIED")),
+                    )
+                elif path == "/api/v1/memories/reject":
+                    value = reject_memory(
+                        root, str(request.get("id", "")), str(request.get("note", ""))
                     )
                 else:
                     self._respond(404, {"error": "Not found"})

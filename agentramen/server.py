@@ -1,4 +1,4 @@
-"""Local-only, versioned HTTP API for GitGraph."""
+"""Local-only, versioned HTTP API for agentRamen."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 from .core import (
-    GitGraphError,
+    AgentRamenError,
     architecture,
     architecture_at,
     context_for,
@@ -27,7 +27,7 @@ WEB_UI = r"""<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="theme-color" content="#f3f5f0">
-<title>GitGraph | Repository workspace</title>
+<title>agentRamen | Repository workspace</title>
 <style>
 :root{color-scheme:light;--paper:#f3f5f0;--surface:#fff;--ink:#202a25;--muted:#6a756d;--line:#dce2dc;--green:#21634a;--green-soft:#e5f0e8;--rust:#a74d37;--gold:#d3a33d;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:"Avenir Next","Segoe UI",sans-serif}
 *{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font:15px/1.5 var(--sans);-webkit-font-smoothing:antialiased}button,input,textarea{font:inherit}button{cursor:pointer}button:focus-visible,input:focus-visible,textarea:focus-visible{outline:3px solid #d3a33d;outline-offset:2px}a{color:inherit}.topbar{height:64px;background:var(--surface);border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;padding:0 30px}.brand{display:flex;align-items:center;gap:10px;text-decoration:none;font-size:18px;font-weight:700}.brand-glyph{display:grid;place-items:center;width:29px;height:29px;background:var(--green);color:#fff;border-radius:5px;font:700 16px var(--mono)}.top-meta{display:flex;align-items:center;gap:15px}.local-badge,.status-pill{font:700 10px var(--mono);letter-spacing:.08em}.local-badge{padding:5px 8px;background:#edf0eb;border-radius:3px;color:#58645b}.status-pill{color:var(--muted)}.status-pill:before{content:"";display:inline-block;width:7px;height:7px;margin-right:7px;border-radius:50%;background:var(--gold)}.status-pill[data-state="ready"]:before{background:var(--green)}.app-shell{display:grid;grid-template-columns:224px minmax(0,1fr);max-width:1520px;min-height:calc(100vh - 64px);margin:auto}.sidebar{display:flex;flex-direction:column;padding:27px 16px 20px 24px;border-right:1px solid var(--line)}.repo-label{padding:0 10px 24px;border-bottom:1px solid var(--line)}.eyebrow{display:block;color:var(--muted);font:700 10px var(--mono);letter-spacing:.1em;text-transform:uppercase}.repo-label strong{display:block;margin-top:8px;font-size:14px;overflow-wrap:anywhere}.repo-detail{display:block;margin-top:3px;color:var(--muted);font-size:12px}.nav-list{display:grid;gap:5px;margin-top:19px}.nav-item{display:flex;align-items:center;gap:11px;width:100%;padding:10px;border:0;border-radius:4px;background:transparent;color:#5e6961;text-align:left}.nav-item:hover{background:#e8ece6;color:var(--ink)}.nav-item[aria-current="page"]{background:var(--green-soft);color:var(--green);font-weight:700}.nav-mark{width:19px;color:inherit;font:12px var(--mono);text-align:center}.privacy-note{margin:auto 8px 0;padding-top:16px;border-top:1px solid var(--line);color:var(--muted);font-size:12px}.privacy-dot{display:inline-block;width:7px;height:7px;margin-right:7px;border-radius:50%;background:var(--green)}main{min-width:0;padding:40px clamp(24px,5vw,70px) 70px}.view{max-width:1040px;margin:0 auto}.view[hidden]{display:none}.page-head{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;margin-bottom:29px}.page-head h1{margin:5px 0 0;font-size:30px;line-height:1.15;font-weight:650}.page-head p{margin:8px 0 0;color:var(--muted)}.primary,.secondary{min-height:40px;padding:0 15px;border:1px solid var(--green);border-radius:4px;background:var(--green);color:#fff;font-weight:650}.primary:hover{background:#194e3a}.secondary{background:var(--surface);color:var(--green)}.secondary:hover{background:var(--green-soft)}.stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));border-top:1px solid var(--line);border-bottom:1px solid var(--line);margin-bottom:38px}.stat{min-width:0;padding:18px 16px 19px 0}.stat+.stat{padding-left:20px;border-left:1px solid var(--line)}.stat-label{display:block;color:var(--muted);font-size:12px}.stat-value{display:block;margin-top:7px;font:600 25px/1.15 var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.section-head{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-bottom:14px}.section-head h2,.subhead{margin:0;font-size:17px;font-weight:650}.subhead{margin:25px 0 12px}.text-button{padding:5px 0;border:0;background:transparent;color:var(--green);font-weight:650}.text-button:hover{text-decoration:underline}.notice{margin:0 0 25px;padding:14px 16px;border-left:3px solid var(--gold);background:#fff9e9}.notice[hidden]{display:none}.notice code{font:12px var(--mono)}.list{border-top:1px solid var(--line)}.list-item{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:13px 2px;border-bottom:1px solid var(--line)}.list-item strong,.file-path{display:block;overflow-wrap:anywhere;font:600 13px var(--mono)}.list-item small,.file-meta{display:block;margin-top:4px;color:var(--muted);font-size:12px}.list-count{flex:none;color:var(--rust);font:600 13px var(--mono)}.form-panel{padding:19px;background:var(--surface);border:1px solid var(--line);border-radius:5px}.field-label{display:block;margin-bottom:7px;font-size:13px;font-weight:650}.task-input,.search-input,.number-input{width:100%;padding:11px 12px;border:1px solid #c9d2ca;border-radius:4px;background:#fff;color:var(--ink)}.task-input{min-height:120px;resize:vertical}.form-row{display:flex;align-items:flex-end;gap:15px;margin-top:13px}.budget-field{width:180px}.budget-field .field-label{margin-bottom:5px}.number-input{height:40px;font-family:var(--mono)}.form-row .primary{margin-left:auto}.results-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:24px 0 10px}.results-head h2{margin:0;font-size:16px}.result-meta{color:var(--muted);font-size:12px}.file-list{display:grid;gap:10px}.file-item{padding:15px 16px;background:var(--surface);border:1px solid var(--line);border-radius:5px}.file-top{display:flex;align-items:flex-start;justify-content:space-between;gap:15px}.file-path{font-size:13px}.file-badges{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:6px}.badge{padding:3px 7px;border-radius:3px;background:#edf0eb;color:#59655d;font:10px var(--mono)}.badge.score{background:var(--green-soft);color:var(--green)}.file-item pre{margin:13px 0 0;padding:12px;overflow:auto;border-left:2px solid var(--gold);background:#f6f7f4;color:#354139;font:12px/1.55 var(--mono);white-space:pre-wrap;overflow-wrap:anywhere}.symbol-line{margin-top:8px;color:var(--muted);font-size:12px}.inspect{margin-top:10px;padding:0;border:0;background:transparent;color:var(--green);font-size:12px;font-weight:650}.inspect:hover{text-decoration:underline}.file-details{margin-top:10px;padding-top:10px;border-top:1px solid var(--line);color:#4c5951;font-size:12px}.file-details[hidden]{display:none}.empty-state,.error-state{padding:23px 16px;border:1px dashed #c9d2ca;border-radius:4px;color:var(--muted);text-align:center}.error-state{border-color:#d9a194;background:#fff7f5;color:#8b3927}.architecture-grid{display:grid;grid-template-columns:1fr 1fr;gap:34px}.breakdown{border-top:1px solid var(--line)}.breakdown-row{padding:11px 0;border-bottom:1px solid var(--line)}.breakdown-label{display:flex;justify-content:space-between;gap:12px;font-size:13px}.breakdown-label strong{font:600 12px var(--mono)}.bar-track{height:5px;margin-top:8px;background:#e4e9e3}.bar-fill{height:100%;background:var(--green)}.relationship-summary{display:flex;flex-wrap:wrap;gap:8px;margin-top:27px}.relationship-chip{padding:7px 10px;border:1px solid var(--line);background:#fff;border-radius:3px;color:#47534b;font:11px var(--mono)}.loading{color:var(--muted);font-size:13px}.inline-error{color:var(--rust);font-size:13px}
@@ -38,7 +38,7 @@ WEB_UI = r"""<!doctype html>
 </style>
 <body>
 <header class="topbar">
-    <a class="brand" href="#overview" aria-label="GitGraph overview"><span class="brand-glyph">G</span><span>GitGraph</span></a>
+    <a class="brand" href="#overview" aria-label="agentRamen overview"><span class="brand-glyph">G</span><span>agentRamen</span></a>
     <div class="top-meta"><span class="local-badge">LOCAL WORKSPACE</span><span class="status-pill" id="connection-status" data-state="loading">Connecting</span></div>
 </header>
 <div class="app-shell">
@@ -55,7 +55,7 @@ WEB_UI = r"""<!doctype html>
     <main id="main-content">
         <section class="view" id="view-overview" aria-labelledby="overview-title">
             <div class="page-head"><div><span class="eyebrow">Repository intelligence</span><h1 id="overview-title">Repository map</h1><p>Code structure and change history, in one place.</p></div><button class="primary" data-open-view="context">Build task context</button></div>
-            <div class="notice" id="index-notice" hidden>No indexed files yet. In this repository, run <code>gitgraph init</code> in a terminal.</div>
+            <div class="notice" id="index-notice" hidden>No indexed files yet. In this repository, run <code>agentramen init</code> in a terminal.</div>
             <div class="stats" aria-live="polite">
                 <div class="stat"><span class="stat-label">Indexed files</span><strong class="stat-value" id="stat-files">--</strong></div>
                 <div class="stat"><span class="stat-label">History commits</span><strong class="stat-value" id="stat-commits">--</strong></div>
@@ -104,7 +104,7 @@ function renderFile(target,file,withExcerpt){
     article.append(inspect,details);target.append(article)
 }
 async function loadStatus(){
-    const pill=byId('connection-status');try{const status=await api('/api/v1/repository');byId('stat-files').textContent=status.files.toLocaleString();byId('stat-commits').textContent=status.commits.toLocaleString();byId('stat-languages').textContent=Object.keys(status.languages).length.toString();byId('stat-latest').textContent=status.last_commit?status.last_commit.slice(0,7):'--';byId('repo-detail').textContent=status.files?status.files.toLocaleString()+' files indexed':'Index not built';byId('index-notice').hidden=status.files>0;pill.textContent=status.files?'Indexed':'Not indexed';pill.dataset.state=status.files?'ready':'empty';if(!status.files)byId('hotspot-list').replaceChildren(node('div','empty-state','No indexed activity yet. Run gitgraph init in this repository.'))}catch(error){pill.textContent='Unavailable';pill.dataset.state='error';byId('repo-detail').textContent='API unavailable';byId('index-notice').hidden=false;byId('index-notice').textContent=error.message}}
+    const pill=byId('connection-status');try{const status=await api('/api/v1/repository');byId('stat-files').textContent=status.files.toLocaleString();byId('stat-commits').textContent=status.commits.toLocaleString();byId('stat-languages').textContent=Object.keys(status.languages).length.toString();byId('stat-latest').textContent=status.last_commit?status.last_commit.slice(0,7):'--';byId('repo-detail').textContent=status.files?status.files.toLocaleString()+' files indexed':'Index not built';byId('index-notice').hidden=status.files>0;pill.textContent=status.files?'Indexed':'Not indexed';pill.dataset.state=status.files?'ready':'empty';if(!status.files)byId('hotspot-list').replaceChildren(node('div','empty-state','No indexed activity yet. Run agentramen init in this repository.'))}catch(error){pill.textContent='Unavailable';pill.dataset.state='error';byId('repo-detail').textContent='API unavailable';byId('index-notice').hidden=false;byId('index-notice').textContent=error.message}}
 async function loadHotspots(){const target=byId('hotspot-list');try{const rows=await api('/api/v1/hotspots');if(!rows.length){setMessage(target,'No change history indexed yet.');return}target.replaceChildren();rows.slice(0,8).forEach(row=>{const item=node('div','list-item');const info=node('div');info.append(node('strong','',row.path));info.append(node('small','',row.authors+' contributors · last changed '+(row.last_changed||'unknown')));item.append(info,node('span','list-count',row.changes+' changes'));target.append(item)})}catch(error){setMessage(target,error.message,true)}}
 function showFiles(target,files,withExcerpt){if(!files.length){setMessage(target,'No matching files found.');return}target.replaceChildren();files.forEach(file=>renderFile(target,file,withExcerpt))}
 byId('context-form').addEventListener('submit',async event=>{event.preventDefault();const target=byId('context-results');const button=event.currentTarget.querySelector('button[type="submit"]');const previous=button.textContent;button.disabled=true;button.textContent='Building…';setMessage(target,'Ranking repository context');byId('context-summary').textContent='';try{const result=await api('/api/v1/context',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({task:byId('task').value,token_budget:Number(byId('budget').value)})});showFiles(target,result.files,true);byId('context-summary').textContent=result.files.length+' files · '+result.estimated_tokens+'/'+result.token_budget+' '+result.token_count_method+' tokens · '+result.confidence+' confidence'}catch(error){setMessage(target,error.message,true)}finally{button.disabled=false;button.textContent=previous}});
@@ -120,7 +120,7 @@ loadStatus();loadHotspots();
 
 def create_server(root: Path, host: str = "127.0.0.1", port: int = 8765):
     class Handler(BaseHTTPRequestHandler):
-        server_version = "GitGraph/0.1"
+        server_version = "agentRamen/0.1"
 
         def _respond(self, status: int, value: object) -> None:
             payload = json.dumps(value, ensure_ascii=False).encode("utf-8")
@@ -175,7 +175,7 @@ def create_server(root: Path, host: str = "127.0.0.1", port: int = 8765):
                     self._respond(404, {"error": "Not found"})
                     return
                 self._respond(200, value)
-            except GitGraphError as exc:
+            except AgentRamenError as exc:
                 self._respond(404, {"error": str(exc)})
             except (OSError, ValueError) as exc:
                 self._respond(400, {"error": str(exc)})
@@ -206,7 +206,7 @@ def create_server(root: Path, host: str = "127.0.0.1", port: int = 8765):
                     self._respond(404, {"error": "Not found"})
                     return
                 self._respond(200, value)
-            except (GitGraphError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            except (AgentRamenError, ValueError, TypeError, json.JSONDecodeError) as exc:
                 self._respond(400, {"error": str(exc)})
 
         def log_message(self, fmt, *args):

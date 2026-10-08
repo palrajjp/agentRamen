@@ -8,14 +8,14 @@ from unittest.mock import patch
 from pathlib import Path
 from urllib.request import Request, urlopen
 
-from gitgraph.cli import _init
-from gitgraph.core import (
+from agentramen.cli import _init
+from agentramen.core import (
     architecture,
     connect,
     context_for,
     dependency_impact,
     explain_file,
-    GitGraphError,
+    AgentRamenError,
     graph_export,
     graph_at,
     hotspots,
@@ -26,7 +26,7 @@ from gitgraph.core import (
 )
 
 
-class GitGraphIndexTests(unittest.TestCase):
+class AgentRamenIndexTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.root = Path(self.temp_dir.name)
@@ -64,7 +64,7 @@ class GitGraphIndexTests(unittest.TestCase):
         self.assertEqual(context["files"][0]["path"], "src/auth_service.py")
         self.assertIn("class AuthService", context["files"][0]["excerpt"])
         self.assertLessEqual(context["estimated_tokens"], 2000)
-        self.assertFalse((self.root / ".gitgraph" / "graph.db").stat().st_size == 0)
+        self.assertFalse((self.root / ".agentramen" / "graph.db").stat().st_size == 0)
 
     def test_update_indexes_only_changed_file_and_removes_deleted_file(self):
         (self.root / "auth.py").write_text("class Auth:\n    pass\n", encoding="utf-8")
@@ -175,7 +175,7 @@ class GitGraphIndexTests(unittest.TestCase):
         self.assertEqual(context_for(self.root, "Credentials")["files"], [])
 
     def test_configured_ignore_patterns_are_applied(self):
-        (self.root / ".gitgraph.yml").write_text("ignore:\n  - private/\n", encoding="utf-8")
+        (self.root / ".agentramen.yml").write_text("ignore:\n  - private/\n", encoding="utf-8")
         (self.root / "private").mkdir()
         (self.root / "private" / "module.py").write_text("class Hidden:\n    pass\n", encoding="utf-8")
         (self.root / "visible.py").write_text("class Visible:\n    pass\n", encoding="utf-8")
@@ -187,7 +187,7 @@ class GitGraphIndexTests(unittest.TestCase):
         self.assertEqual(repo_search(self.root, "Hidden"), [])
 
     def test_configuration_controls_history_retention_and_cochanges(self):
-        config_path = self.root / ".gitgraph.yml"
+        config_path = self.root / ".agentramen.yml"
         source = self.root / "module.py"
         for index in range(3):
             source.write_text(f"class Module{index}:\n    pass\n", encoding="utf-8")
@@ -238,7 +238,7 @@ class GitGraphIndexTests(unittest.TestCase):
         (self.root / "one.py").write_text("class One:\n    pass\n", encoding="utf-8")
         (self.root / "two.py").write_text("class Two:\n    pass\n", encoding="utf-8")
         self.commit("add files")
-        config = self.root / ".gitgraph.yml"
+        config = self.root / ".agentramen.yml"
         config.write_text("indexing:\n  incremental: false\n", encoding="utf-8")
         index_repository(self.root)
 
@@ -247,16 +247,16 @@ class GitGraphIndexTests(unittest.TestCase):
         self.assertEqual(result["indexed"], 2)
 
     def test_invalid_context_budget_in_config_is_reported(self):
-        (self.root / ".gitgraph.yml").write_text(
+        (self.root / ".agentramen.yml").write_text(
             "context:\n  default_budget: 10\n", encoding="utf-8"
         )
-        with self.assertRaisesRegex(GitGraphError, "context.default_budget"):
+        with self.assertRaisesRegex(AgentRamenError, "context.default_budget"):
             load_config(self.root)
 
     def test_context_uses_configured_tokenizer_consistently_with_budget(self):
-        from gitgraph.core import _TOKENIZERS, _count_context_tokens
+        from agentramen.core import _TOKENIZERS, _count_context_tokens
 
-        (self.root / ".gitgraph.yml").write_text(
+        (self.root / ".agentramen.yml").write_text(
             "context:\n  tokenizer_model: test-model\n", encoding="utf-8"
         )
         (self.root / "auth.py").write_text(
@@ -296,7 +296,7 @@ class GitGraphIndexTests(unittest.TestCase):
             _TOKENIZERS.pop("test-model", None)
 
     def test_context_fallback_reports_approximate_serialized_payload_count(self):
-        from gitgraph.core import _count_context_tokens
+        from agentramen.core import _count_context_tokens
 
         (self.root / "auth.py").write_text("class Auth:\n    pass\n", encoding="utf-8")
         self.commit("add auth")
@@ -320,10 +320,10 @@ class GitGraphIndexTests(unittest.TestCase):
             import tiktoken
         except ImportError:
             self.skipTest("Tokenizer optional dependency is not installed")
-        from gitgraph.core import _TOKENIZERS
+        from agentramen.core import _TOKENIZERS
 
         model = "gpt-4o-mini"
-        (self.root / ".gitgraph.yml").write_text(
+        (self.root / ".agentramen.yml").write_text(
             f"context:\n  tokenizer_model: {model}\n", encoding="utf-8"
         )
         (self.root / "auth.py").write_text("class Auth:\n    pass\n", encoding="utf-8")
@@ -352,20 +352,20 @@ class GitGraphIndexTests(unittest.TestCase):
         _TOKENIZERS.pop(model, None)
 
     def test_tokenizer_configuration_requires_string(self):
-        (self.root / ".gitgraph.yml").write_text(
+        (self.root / ".agentramen.yml").write_text(
             "context:\n  tokenizer_model: true\n", encoding="utf-8"
         )
-        with self.assertRaisesRegex(GitGraphError, "context.tokenizer_model"):
+        with self.assertRaisesRegex(AgentRamenError, "context.tokenizer_model"):
             load_config(self.root)
 
     def test_semantic_benchmark_comparison_reports_unavailable_model(self):
-        from gitgraph.benchmark import run_comparisons
+        from agentramen.benchmark import run_comparisons
 
         with patch(
-            "gitgraph.benchmark.run_benchmark",
+            "agentramen.benchmark.run_benchmark",
             side_effect=[
                 {"semantic_enabled": False, "context_retrieval_seconds": 0.01},
-                GitGraphError("embedding model unavailable"),
+                AgentRamenError("embedding model unavailable"),
             ],
         ):
             result = run_comparisons([10], None, (False, True))
@@ -376,9 +376,9 @@ class GitGraphIndexTests(unittest.TestCase):
         self.assertEqual(result[1]["error"], "embedding model unavailable")
 
     def test_local_http_api_exposes_versioned_context(self):
-        from gitgraph.server import create_server
+        from agentramen.server import create_server
 
-        (self.root / ".gitgraph.yml").write_text(
+        (self.root / ".agentramen.yml").write_text(
             "context:\n  default_budget: 500\n", encoding="utf-8"
         )
         (self.root / "auth.py").write_text("class AuthService:\n    pass\n", encoding="utf-8")
@@ -435,10 +435,10 @@ class GitGraphIndexTests(unittest.TestCase):
         workflow = (self.root / result["workflow"]).read_text(encoding="utf-8")
         self.assertIn("version: 1", config)
         self.assertIn("commits: 100", config)
-        self.assertIn("uses: palrajjp/gitGraph/.github/workflows/index.yml@main", workflow)
+        self.assertIn("uses: palrajjp/agentRamen/.github/workflows/index.yml@main", workflow)
 
     def test_mcp_exposes_context_tool(self):
-        (self.root / ".gitgraph.yml").write_text(
+        (self.root / ".agentramen.yml").write_text(
             "context:\n  default_budget: 350\n", encoding="utf-8"
         )
         (self.root / "auth.py").write_text("class AuthService:\n    pass\n", encoding="utf-8")
@@ -457,7 +457,7 @@ class GitGraphIndexTests(unittest.TestCase):
         import_code = (
             "import sys; "
             f"sys.path.insert(0, {str(Path(__file__).resolve().parents[1])!r}); "
-            "from gitgraph.cli import main; "
+            "from agentramen.cli import main; "
             "raise SystemExit(main(['mcp']))"
         )
         response = subprocess.run(
@@ -509,7 +509,7 @@ class GitGraphIndexTests(unittest.TestCase):
     def test_indexed_context_ranking_matches_full_scan_reference(self):
         from collections import Counter
 
-        from gitgraph.core import _terms
+        from agentramen.core import _terms
 
         (self.root / "auth_service.py").write_text(
             "class AuthService:\n    def login(self): pass\n", encoding="utf-8"
@@ -593,9 +593,9 @@ class GitGraphIndexTests(unittest.TestCase):
         )
 
     def test_tree_sitter_analyzer_falls_back_when_optional_package_is_missing(self):
-        from gitgraph.analyzers import TreeSitterAnalyzer
+        from agentramen.analyzers import TreeSitterAnalyzer
 
-        with patch("gitgraph.analyzers.importlib.import_module", side_effect=ImportError):
+        with patch("agentramen.analyzers.importlib.import_module", side_effect=ImportError):
             result = TreeSitterAnalyzer("javascript").analyze(
                 "auth.js", "export class AuthService {}\n"
             )
@@ -606,7 +606,7 @@ class GitGraphIndexTests(unittest.TestCase):
             import tree_sitter_language_pack
         except ImportError:
             self.skipTest("Tree-sitter optional dependency is not installed")
-        from gitgraph.analyzers import analyze
+        from agentramen.analyzers import analyze
 
         result = analyze(
             "auth.js",
@@ -618,7 +618,7 @@ class GitGraphIndexTests(unittest.TestCase):
         self.assertIn("send", result.calls)
 
     def test_semantic_embeddings_can_retrieve_without_lexical_overlap(self):
-        (self.root / ".gitgraph.yml").write_text(
+        (self.root / ".agentramen.yml").write_text(
             "semantic:\n  enabled: true\n  model: test-model\n", encoding="utf-8"
         )
         (self.root / "access.py").write_text(
@@ -626,7 +626,7 @@ class GitGraphIndexTests(unittest.TestCase):
         )
         self.commit("add access manager")
 
-        with patch("gitgraph.core._embed_texts", side_effect=lambda _model, texts: [[1.0, 0.0] for _ in texts]):
+        with patch("agentramen.core._embed_texts", side_effect=lambda _model, texts: [[1.0, 0.0] for _ in texts]):
             index_repository(self.root)
             context = context_for(self.root, "How can a visitor enter?", 500)
 

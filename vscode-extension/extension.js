@@ -4,7 +4,7 @@ const { execFile } = require("child_process");
 let output;
 
 function run(args, cwd) {
-  const exe = vscode.workspace.getConfiguration("gitgraph").get("executable", "gitgraph");
+  const exe = vscode.workspace.getConfiguration("agentramen").get("executable", "agentramen");
   return new Promise((resolve, reject) => {
     execFile(exe, args, { cwd, maxBuffer: 32 * 1024 * 1024 }, (err, stdout, stderr) => {
       if (err) {
@@ -44,27 +44,27 @@ function command(fn) {
     try {
       await fn();
     } catch (e) {
-      vscode.window.showErrorMessage(`GitGraph: ${e.message}`);
+      vscode.window.showErrorMessage(`agentRamen: ${e.message}`);
     }
   };
 }
 
 function activate(context) {
-  output = vscode.window.createOutputChannel("GitGraph");
+  output = vscode.window.createOutputChannel("agentRamen");
   const reg = (id, fn) =>
     context.subscriptions.push(vscode.commands.registerCommand(id, command(fn)));
-  reg("gitgraph.index", async () => {
+  reg("agentramen.index", async () => {
     await run(["index"], workspaceRoot());
-    vscode.window.showInformationMessage("GitGraph: repository indexed.");
+    vscode.window.showInformationMessage("agentRamen: repository indexed.");
   });
-  reg("gitgraph.context", async () => {
+  reg("agentramen.context", async () => {
     const task = await vscode.window.showInputBox({ prompt: "Describe the task" });
     if (task) {
       await show(["context", task]);
     }
   });
-  reg("gitgraph.impact", () => show(["impact", currentRelativePath()]));
-  reg("gitgraph.history", () => show(["history", currentRelativePath()]));
+  reg("agentramen.impact", () => show(["impact", currentRelativePath()]));
+  reg("agentramen.history", () => show(["history", currentRelativePath()]));
   context.subscriptions.push(output);
 }
 

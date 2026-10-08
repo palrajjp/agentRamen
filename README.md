@@ -1,29 +1,29 @@
-# GitGraph
+# agentRamen
 
-[![CI](https://github.com/palrajjp/gitGraph/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/palrajjp/gitGraph/actions/workflows/tests.yml)
+[![CI](https://github.com/palrajjp/agentRamen/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/palrajjp/agentRamen/actions/workflows/tests.yml)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-3776AB.svg)](https://www.python.org/)
 [![Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-4C8BF5.svg)](LICENSE)
-[![GitHub stars](https://img.shields.io/github/stars/palrajjp/gitGraph?style=social)](https://github.com/palrajjp/gitGraph/stargazers)
+[![GitHub stars](https://img.shields.io/github/stars/palrajjp/agentRamen?style=social)](https://github.com/palrajjp/agentRamen/stargazers)
 
 **A local map of your codebase, ready for the next coding task.**
 
 *Persistent memory for your Git repo and AI coding agents.*
 
-GitGraph indexes source structure and Git history into a local SQLite graph, then retrieves the files and excerpts most relevant to a task. Use it from the CLI, an MCP-compatible coding agent, or its local HTTP interface. No hosted service, API key, or runtime dependency is required by default.
+agentRamen indexes source structure and Git history into a local SQLite graph, then retrieves the files and excerpts most relevant to a task. Use it from the CLI, an MCP-compatible coding agent, or its local HTTP interface. No hosted service, API key, or runtime dependency is required by default.
 
 ## Quick start
 
-Install GitGraph, then run it from the repository you want to explore:
+Install agentRamen, then run it from the repository you want to explore:
 
 ```bash
-python -m pip install git+https://github.com/palrajjp/gitGraph.git
+python -m pip install git+https://github.com/palrajjp/agentRamen.git
 cd /path/to/your/repository
-gitgraph init
-gitgraph context "Add authentication" --budget 2000
-gitgraph impact src/auth.py
+agentramen init
+agentramen context "Add authentication" --budget 2000
+agentramen impact src/auth.py
 ```
 
-`gitgraph init` creates the configuration, indexes the repository, and offers an optional GitHub Actions caller workflow. The index is stored locally in `.gitgraph/graph.db`.
+`agentramen init` creates the configuration, indexes the repository, and offers an optional GitHub Actions caller workflow. The index is stored locally in `.agentramen/graph.db`.
 
 Try it in 30 seconds with [`examples/demo.sh`](examples/demo.sh). See the [roadmap](ROADMAP.md) and [contributing guide](CONTRIBUTING.md).
 
@@ -57,14 +57,14 @@ The default install uses the Python standard library and conservative analysis f
 To install from a local checkout instead:
 
 ```bash
-git clone https://github.com/palrajjp/gitGraph.git
-cd gitGraph
+git clone https://github.com/palrajjp/agentRamen.git
+cd agentRamen
 python -m pip install .
 ```
 
 Optional extras enable structured parsing for additional languages and local semantic retrieval:
 
-GitGraph's default installation runs locally with no runtime dependencies. Python files use the standard-library AST; other supported extensions use conservative regex analysis unless the optional Tree-sitter extra is installed. Source excerpts are read on demand for context. When semantic retrieval is enabled, locally generated embeddings are also stored in `.gitgraph/graph.db`; source and embeddings are not sent to a GitGraph service.
+agentRamen's default installation runs locally with no runtime dependencies. Python files use the standard-library AST; other supported extensions use conservative regex analysis unless the optional Tree-sitter extra is installed. Source excerpts are read on demand for context. When semantic retrieval is enabled, locally generated embeddings are also stored in `.agentramen/graph.db`; source and embeddings are not sent to a agentRamen service.
 
 ## Install
 
@@ -73,8 +73,8 @@ Requires Python 3.10+ and Git.
 ```bash
 python -m pip install .
 cd /path/to/a/git/repository
-gitgraph init
-gitgraph context "Add authentication"
+agentramen init
+agentramen context "Add authentication"
 ```
 
 Optional extras enable structured parsing for additional languages and local semantic retrieval:
@@ -87,11 +87,11 @@ python -m pip install '.[tokenizer]'
 
 Semantic retrieval uses FastEmbed and may download/initialize its configured model on first use; embedding inference runs locally.
 
-`gitgraph init` creates `.gitgraph.yml` and a GitHub Actions caller workflow if they do not exist, then creates/updates `.gitgraph/graph.db`. `gitgraph update` and `gitgraph index` incrementally refresh changed files. The database is ignored by Git.
+`agentramen init` creates `.agentramen.yml` and a GitHub Actions caller workflow if they do not exist, then creates/updates `.agentramen/graph.db`. `agentramen update` and `agentramen index` incrementally refresh changed files. The database is ignored by Git.
 
 ### Configuration
 
-GitGraph reads the following fields from `.gitgraph.yml`:
+agentRamen reads the following fields from `.agentramen.yml`:
 
 ```yaml
 version: 1
@@ -114,33 +114,33 @@ ignore:
   - private/
 ```
 
-`indexing.incremental: false` reparses every eligible file on each index. `git.history: false` removes stored commit, rename, and co-change history; enabling it later rebuilds the configured recent history. `history.commits` controls retained commits (1–100,000), and `git.co_changes` toggles co-change edges. `context.default_budget` is used by the CLI, MCP, and HTTP API when no budget is passed. Configuration is a dependency-free YAML subset; unsupported/malformed values are rejected with a setting-specific error. `.gitgraphignore` patterns are added to, rather than replacing, the built-in and YAML ignore rules.
+`indexing.incremental: false` reparses every eligible file on each index. `git.history: false` removes stored commit, rename, and co-change history; enabling it later rebuilds the configured recent history. `history.commits` controls retained commits (1–100,000), and `git.co_changes` toggles co-change edges. `context.default_budget` is used by the CLI, MCP, and HTTP API when no budget is passed. Configuration is a dependency-free YAML subset; unsupported/malformed values are rejected with a setting-specific error. `.agentramenignore` patterns are added to, rather than replacing, the built-in and YAML ignore rules.
 
-`semantic.enabled: true` opts into local embedding generation and semantic context ranking; install `gitgraph[semantic]` first. `semantic.model` selects a FastEmbed model. `gitgraph[treesitter]` opts into Tree-sitter-based parsing for supported non-Python languages; without it, or if a grammar is unavailable, GitGraph falls back to regex analysis.
+`semantic.enabled: true` opts into local embedding generation and semantic context ranking; install `agentramen[semantic]` first. `semantic.model` selects a FastEmbed model. `agentramen[treesitter]` opts into Tree-sitter-based parsing for supported non-Python languages; without it, or if a grammar is unavailable, agentRamen falls back to regex analysis.
 
-`context.tokenizer_model` optionally selects a model supported by `tiktoken` for tokenizer-based context budgets; install `gitgraph[tokenizer]` to use it. The tokenizer vocabulary may be downloaded and cached on first use, then counting runs locally. Leave it empty to use the dependency-free approximate character-based fallback. Context responses identify `token_count_method` (`tiktoken` or `approximate`) and the tokenizer model when configured. The reported total counts the compact serialized `files` payload (the retrieved context), using the same method as selection and budgeting; per-file counts are provided as `estimated_tokens`.
+`context.tokenizer_model` optionally selects a model supported by `tiktoken` for tokenizer-based context budgets; install `agentramen[tokenizer]` to use it. The tokenizer vocabulary may be downloaded and cached on first use, then counting runs locally. Leave it empty to use the dependency-free approximate character-based fallback. Context responses identify `token_count_method` (`tiktoken` or `approximate`) and the tokenizer model when configured. The reported total counts the compact serialized `files` payload (the retrieved context), using the same method as selection and budgeting; per-file counts are provided as `estimated_tokens`.
 
 ## Commands
 
 ```text
-gitgraph init
-gitgraph index [--json]
-gitgraph update [--json]
-gitgraph status [--json]
-gitgraph context "Add OAuth login" [--budget 2000] [--json]
-gitgraph impact src/auth/AuthService.ts [--json]
-gitgraph explain src/auth/AuthService.ts [--json]
-gitgraph history src/auth/AuthService.ts [--json]
-gitgraph search "auth login" [--limit 20] [--json]
-gitgraph architecture [--at <commit>] [--json]
-gitgraph hotspots [--limit 20] [--json]
-gitgraph changes [--limit 20] [--json]
-gitgraph diff <commit1> <commit2> [--json]
-gitgraph pr [--base origin/main] [--json]
-gitgraph export [--at <commit>] [--json]
-gitgraph benchmark --files 10 1000
-gitgraph serve [--host 127.0.0.1] [--port 8765]
-gitgraph mcp
+agentramen init
+agentramen index [--json]
+agentramen update [--json]
+agentramen status [--json]
+agentramen context "Add OAuth login" [--budget 2000] [--json]
+agentramen impact src/auth/AuthService.ts [--json]
+agentramen explain src/auth/AuthService.ts [--json]
+agentramen history src/auth/AuthService.ts [--json]
+agentramen search "auth login" [--limit 20] [--json]
+agentramen architecture [--at <commit>] [--json]
+agentramen hotspots [--limit 20] [--json]
+agentramen changes [--limit 20] [--json]
+agentramen diff <commit1> <commit2> [--json]
+agentramen pr [--base origin/main] [--json]
+agentramen export [--at <commit>] [--json]
+agentramen benchmark --files 10 1000
+agentramen serve [--host 127.0.0.1] [--port 8765]
+agentramen mcp
 ```
 
 Example context response:
@@ -168,10 +168,10 @@ Context includes source excerpts only when the file still matches its indexed ha
 
 ## GitHub Actions
 
-The workflow created by `gitgraph init` calls the reusable workflow in this repository:
+The workflow created by `agentramen init` calls the reusable workflow in this repository:
 
 ```yaml
-name: GitGraph
+name: agentRamen
 on:
   push:
     branches: ["**"]
@@ -180,8 +180,8 @@ on:
   schedule:
     - cron: "17 4 * * 1"
 jobs:
-  gitgraph:
-    uses: palrajjp/gitGraph/.github/workflows/index.yml@main
+  agentramen:
+    uses: palrajjp/agentRamen/.github/workflows/index.yml@main
 ```
 
 The reusable workflow fetches Git history, restores a cache, tests the installed package, indexes the checked-out revision, summarizes pull requests, and publishes the local SQLite artifact. Use a full-depth checkout when running the CLI outside this reusable workflow to retain history.
@@ -192,38 +192,38 @@ Call the reusable workflow before a deployment or agent job. Supplying `task` al
 
 ```yaml
 jobs:
-  gitgraph:
-    uses: palrajjp/gitGraph/.github/workflows/index.yml@main
+  agentramen:
+    uses: palrajjp/agentRamen/.github/workflows/index.yml@main
     with:
       task: "Trace the deployment workflow and identify rollback dependencies"
       token_budget: 1200
 ```
 
-The artifact is named `gitgraph-context-${{ github.sha }}`. A downstream job can fetch it and pass `.gitgraph-context/gitgraph-context.json` to its agent step:
+The artifact is named `agentramen-context-${{ github.sha }}`. A downstream job can fetch it and pass `.agentramen-context/agentramen-context.json` to its agent step:
 
 ```yaml
 - uses: actions/download-artifact@v4
   with:
-    name: gitgraph-context-${{ github.sha }}
-    path: .gitgraph-context
+    name: agentramen-context-${{ github.sha }}
+    path: .agentramen-context
 ```
 
 The context budget defaults to 2000 if omitted. Treat the artifact like source code: it can contain excerpts and follows the repository's GitHub Actions access and retention policy.
 
 ## Agent integrations
 
-GitGraph's MCP server runs locally over stdio. Install GitGraph once on each developer machine, then add a portable `.mcp.json` at the repository root so VS Code Copilot and Claude Code can use the same configuration:
+agentRamen's MCP server runs locally over stdio. Install agentRamen once on each developer machine, then add a portable `.mcp.json` at the repository root so VS Code Copilot and Claude Code can use the same configuration:
 
 ```bash
-python -m pip install git+https://github.com/palrajjp/gitGraph.git
+python -m pip install git+https://github.com/palrajjp/agentRamen.git
 ```
 
 ```json
 {
   "mcpServers": {
-    "gitgraph": {
+    "agentramen": {
       "type": "stdio",
-      "command": "gitgraph",
+      "command": "agentramen",
       "args": ["mcp"]
     }
   }
@@ -233,40 +233,40 @@ python -m pip install git+https://github.com/palrajjp/gitGraph.git
 For Claude Code, the project-scoped command creates or updates `.mcp.json`:
 
 ```bash
-claude mcp add --transport stdio --scope project gitgraph -- gitgraph mcp
+claude mcp add --transport stdio --scope project agentramen -- agentramen mcp
 ```
 
 For GitHub Copilot CLI, save the same `mcpServers` object in `$COPILOT_HOME/mcp-config.json`, or `~/.copilot/mcp-config.json` when `COPILOT_HOME` is unset. See the [VS Code MCP configuration guide](https://code.visualstudio.com/docs/agent-customization/mcp-servers) and [Claude Code MCP guide](https://code.claude.com/docs/en/mcp) for client-specific setup and trust prompts.
 
-In VS Code, trust the workspace and start the `gitgraph` MCP server from the MCP Servers view. Each developer keeps an independent `.gitgraph/graph.db`; commit `.gitgraph.yml` and `.mcp.json` for shared settings, but do not put a live SQLite database on a network share.
+In VS Code, trust the workspace and start the `agentramen` MCP server from the MCP Servers view. Each developer keeps an independent `.agentramen/graph.db`; commit `.agentramen.yml` and `.mcp.json` for shared settings, but do not put a live SQLite database on a network share.
 
 ### Keep agent context focused
 
 Add an instruction like this to the project's `AGENTS.md`, `CLAUDE.md`, or Copilot instructions:
 
-> For repository analysis, call `repo_context` with the current task before broad file reads. Start with a 1200-token budget, use the returned paths as the investigation boundary, then call `repo_explain` or `repo_impact` for targeted follow-up. Expand the search only when the indexed context is insufficient. Ask for `gitgraph update` if the index appears stale.
+> For repository analysis, call `repo_context` with the current task before broad file reads. Start with a 1200-token budget, use the returned paths as the investigation boundary, then call `repo_explain` or `repo_impact` for targeted follow-up. Expand the search only when the indexed context is insufficient. Ask for `agentramen update` if the index appears stale.
 
-The budget caps retrieved context, not the model's entire conversation. Counts use an approximate character-based estimate by default; install `gitgraph[tokenizer]` and set `context.tokenizer_model` when model-specific counting is important. Run `gitgraph update` to incrementally refresh a developer's local index after changes.
+The budget caps retrieved context, not the model's entire conversation. Counts use an approximate character-based estimate by default; install `agentramen[tokenizer]` and set `context.tokenizer_model` when model-specific counting is important. Run `agentramen update` to incrementally refresh a developer's local index after changes.
 
 ### ChatGPT and GPT Store
 
-Custom GPTs cannot start a developer's local stdio process. A GPT Action or hosted ChatGPT app needs a reachable HTTPS service with authentication. `gitgraph serve` binds to localhost and has no authentication, so do not expose it directly to the internet; a secure remote integration requires an authenticated gateway or a separately hosted MCP service. GPT creation and publishing availability depends on the current ChatGPT plan and workspace policy; see OpenAI's [GPT creation guide](https://help.openai.com/en/articles/8554397-creating-a-gpt).
+Custom GPTs cannot start a developer's local stdio process. A GPT Action or hosted ChatGPT app needs a reachable HTTPS service with authentication. `agentramen serve` binds to localhost and has no authentication, so do not expose it directly to the internet; a secure remote integration requires an authenticated gateway or a separately hosted MCP service. GPT creation and publishing availability depends on the current ChatGPT plan and workspace policy; see OpenAI's [GPT creation guide](https://help.openai.com/en/articles/8554397-creating-a-gpt).
 
 ## MCP
 
-Run `gitgraph mcp` from a repository and configure your MCP-compatible agent to launch that command in the repository working directory. Tools include `repo_context`, `repo_status`, `repo_history`, `repo_search`, `repo_explain`, `repo_impact`, `repo_dependencies`, `repo_tests`, `repo_changes`, `repo_architecture`, `repo_hotspots`, and `repo_graph`. The stdio server needs no API keys and does not access a network service.
+Run `agentramen mcp` from a repository and configure your MCP-compatible agent to launch that command in the repository working directory. Tools include `repo_context`, `repo_status`, `repo_history`, `repo_search`, `repo_explain`, `repo_impact`, `repo_dependencies`, `repo_tests`, `repo_changes`, `repo_architecture`, `repo_hotspots`, and `repo_graph`. The stdio server needs no API keys and does not access a network service.
 
 ## Local HTTP API
 
-`gitgraph serve` listens only on `127.0.0.1` by default. The browser UI is available at `/` and `/ui`. The API provides `GET /health`, `GET /api/v1/repository`, `/architecture`, `/graph`, `/files/{path}`, `/impact?path=...`, `/history?path=...`, `/hotspots`, and `POST /api/v1/context` or `/api/v1/search`. Append `?at=<commit>` to `/api/v1/graph` or `/api/v1/architecture` to query a cached, commit-addressable graph snapshot. POST requests accept JSON objects such as `{"task":"Add OAuth","token_budget":2000}`. No authentication is provided; do not bind to a public interface without placing an authenticated access-control layer in front.
+`agentramen serve` listens only on `127.0.0.1` by default. The browser UI is available at `/` and `/ui`. The API provides `GET /health`, `GET /api/v1/repository`, `/architecture`, `/graph`, `/files/{path}`, `/impact?path=...`, `/history?path=...`, `/hotspots`, and `POST /api/v1/context` or `/api/v1/search`. Append `?at=<commit>` to `/api/v1/graph` or `/api/v1/architecture` to query a cached, commit-addressable graph snapshot. POST requests accept JSON objects such as `{"task":"Add OAuth","token_budget":2000}`. No authentication is provided; do not bind to a public interface without placing an authenticated access-control layer in front.
 
 ## Benchmarking
 
-Run `gitgraph benchmark --files 10 1000` to measure synthetic initial indexing, a one-file incremental update, and context retrieval. Add `--repository /path/to/repo` to measure a temporary copy of a real repository's tracked working-tree files as well. Use `--semantic-mode both` to compare semantic retrieval off/on; the enabled run requires `gitgraph[semantic]` and downloads its configured model if needed. If model setup is unavailable, the comparison reports that mode as an error and still returns measurements for the successful mode. Output includes lexical candidate count, database size, and retrieval/index timings. Results are local measurements, not cross-machine guarantees.
+Run `agentramen benchmark --files 10 1000` to measure synthetic initial indexing, a one-file incremental update, and context retrieval. Add `--repository /path/to/repo` to measure a temporary copy of a real repository's tracked working-tree files as well. Use `--semantic-mode both` to compare semantic retrieval off/on; the enabled run requires `agentramen[semantic]` and downloads its configured model if needed. If model setup is unavailable, the comparison reports that mode as an error and still returns measurements for the successful mode. Output includes lexical candidate count, database size, and retrieval/index timings. Results are local measurements, not cross-machine guarantees.
 
 ## Privacy and exclusions
 
-The index stays in `.gitgraph/graph.db` on the local machine or in the configured CI artifact. With semantic retrieval disabled, the database stores source metadata and hashes; when enabled, it additionally stores locally generated embeddings. GitGraph skips common generated directories, environment files, private-key files, oversized files, binary files, and files containing recognizable private-key or credential assignment patterns. Add more path patterns to `.gitgraphignore` (one pattern per line). Review your ignore rules before publishing generated artifacts.
+The index stays in `.agentramen/graph.db` on the local machine or in the configured CI artifact. With semantic retrieval disabled, the database stores source metadata and hashes; when enabled, it additionally stores locally generated embeddings. agentRamen skips common generated directories, environment files, private-key files, oversized files, binary files, and files containing recognizable private-key or credential assignment patterns. Add more path patterns to `.agentramenignore` (one pattern per line). Review your ignore rules before publishing generated artifacts.
 
 ## Current limitations
 
@@ -278,7 +278,7 @@ Lexical context retrieval uses an incremental SQLite inverted index over paths, 
 
 ```bash
 python -m unittest discover -s tests -v
-python -m gitgraph.cli status --json
+python -m agentramen.cli status --json
 ```
 
-If GitGraph is useful in your workflow, [a GitHub star](https://github.com/palrajjp/gitGraph/stargazers) helps other developers find it. Contributions that add language analyzers should keep parser-specific behavior separate from the indexing and context interfaces; see [CONTRIBUTING.md](CONTRIBUTING.md).
+If agentRamen is useful in your workflow, [a GitHub star](https://github.com/palrajjp/agentRamen/stargazers) helps other developers find it. Contributions that add language analyzers should keep parser-specific behavior separate from the indexing and context interfaces; see [CONTRIBUTING.md](CONTRIBUTING.md).

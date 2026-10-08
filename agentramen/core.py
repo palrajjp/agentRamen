@@ -18,10 +18,10 @@ from .analyzers import analyze, module_candidates
 
 DEFAULT_IGNORES = (
     ".git/",
-    ".gitgraph/",
-    ".gitgraph.yml",
-    ".gitgraphignore",
-    ".gitgraph-action/",
+    ".agentramen/",
+    ".agentramen.yml",
+    ".agentramenignore",
+    ".agentramen-action/",
     "node_modules/",
     "dist/",
     "build/",
@@ -72,7 +72,7 @@ _EMBEDDING_MODELS: dict[str, object] = {}
 _TOKENIZERS: dict[str, object] = {}
 
 
-class GitGraphError(RuntimeError):
+class AgentRamenError(RuntimeError):
     pass
 
 
@@ -101,8 +101,8 @@ def _config_scalar(value: str):
 
 
 def load_config(root: Path) -> RepositoryConfig:
-    """Read the simple, dependency-free YAML subset generated/documented by GitGraph."""
-    config_path = root / ".gitgraph.yml"
+    """Read the simple, dependency-free YAML subset generated/documented by agentRamen."""
+    config_path = root / ".agentramen.yml"
     if not config_path.is_file():
         return RepositoryConfig()
 
@@ -120,17 +120,17 @@ def load_config(root: Path) -> RepositoryConfig:
         parent = stack[-1][1]
         if text.startswith("- "):
             if not isinstance(parent, list):
-                raise GitGraphError(
+                raise AgentRamenError(
                     f"Invalid configuration at line {line_number}: list item without a list."
                 )
             parent.append(_config_scalar(text[2:]))
             continue
         if ":" not in text or not isinstance(parent, dict):
-            raise GitGraphError(f"Invalid configuration at line {line_number}.")
+            raise AgentRamenError(f"Invalid configuration at line {line_number}.")
         key, raw_value = text.split(":", 1)
         key = key.strip()
         if not key:
-            raise GitGraphError(f"Invalid configuration key at line {line_number}.")
+            raise AgentRamenError(f"Invalid configuration key at line {line_number}.")
         if not raw_value.strip():
             child: dict[str, object] | list[object] = [] if key == "ignore" else {}
             parent[key] = child
@@ -141,7 +141,7 @@ def load_config(root: Path) -> RepositoryConfig:
     def mapping(parent: dict[str, object], key: str) -> dict[str, object]:
         value = parent.get(key, {})
         if not isinstance(value, dict):
-            raise GitGraphError(f"Configuration '{key}' must be a mapping.")
+            raise AgentRamenError(f"Configuration '{key}' must be a mapping.")
         return value
 
     indexing = mapping(document, "indexing")
@@ -151,7 +151,7 @@ def load_config(root: Path) -> RepositoryConfig:
     semantic = mapping(document, "semantic")
     ignore = document.get("ignore", [])
     if not isinstance(ignore, list) or any(not isinstance(item, str) for item in ignore):
-        raise GitGraphError("Configuration 'ignore' must be a list of patterns.")
+        raise AgentRamenError("Configuration 'ignore' must be a list of patterns.")
 
     incremental = indexing.get("incremental", True)
     history_enabled = git_options.get("history", True)
@@ -168,19 +168,19 @@ def load_config(root: Path) -> RepositoryConfig:
         ("semantic.enabled", semantic_enabled),
     ):
         if not isinstance(value, bool):
-            raise GitGraphError(f"Configuration '{name}' must be true or false.")
+            raise AgentRamenError(f"Configuration '{name}' must be true or false.")
     for name, value, minimum, maximum in (
         ("history.commits", history_commits, 1, 100_000),
         ("context.default_budget", default_budget, 100, 100_000),
     ):
         if not isinstance(value, int) or isinstance(value, bool) or not minimum <= value <= maximum:
-            raise GitGraphError(
+            raise AgentRamenError(
                 f"Configuration '{name}' must be an integer from {minimum} to {maximum}."
             )
     if not isinstance(embedding_model, str) or not embedding_model.strip():
-        raise GitGraphError("Configuration 'semantic.model' must be a non-empty string.")
+        raise AgentRamenError("Configuration 'semantic.model' must be a non-empty string.")
     if not isinstance(tokenizer_model, str):
-        raise GitGraphError("Configuration 'context.tokenizer_model' must be a string.")
+        raise AgentRamenError("Configuration 'context.tokenizer_model' must be a string.")
     return RepositoryConfig(
         incremental=incremental,
         history_enabled=history_enabled,
@@ -206,9 +206,9 @@ def git(root: Path, *args: str, check: bool = True) -> str:
             errors="replace",
         )
     except FileNotFoundError as exc:
-        raise GitGraphError("Git is required but was not found on PATH.") from exc
+        raise AgentRamenError("Git is required but was not found on PATH.") from exc
     if check and result.returncode:
-        raise GitGraphError(result.stderr.strip() or "Git command failed.")
+        raise AgentRamenError(result.stderr.strip() or "Git command failed.")
     return result.stdout
 
 
@@ -221,7 +221,7 @@ def _is_ancestor(root: Path, ancestor: str, descendant: str) -> bool:
             stderr=subprocess.DEVNULL,
         )
     except FileNotFoundError as exc:
-        raise GitGraphError("Git is required but was not found on PATH.") from exc
+        raise AgentRamenError("Git is required but was not found on PATH.") from exc
     return result.returncode == 0
 
 
@@ -229,12 +229,12 @@ def find_root(path: Path | None = None) -> Path:
     path = (path or Path.cwd()).resolve()
     root = git(path, "rev-parse", "--show-toplevel", check=False).strip()
     if not root:
-        raise GitGraphError(f"{path} is not inside a Git repository.")
+        raise AgentRamenError(f"{path} is not inside a Git repository.")
     return Path(root)
 
 
 def database_path(root: Path) -> Path:
-    return root / ".gitgraph" / "graph.db"
+    return root / ".agentramen" / "graph.db"
 
 
 def connect(root: Path) -> sqlite3.Connection:
@@ -337,7 +337,7 @@ def connect(root: Path) -> sqlite3.Connection:
 
 def _ignore_patterns(root: Path) -> list[str]:
     patterns = [*DEFAULT_IGNORES, *load_config(root).ignore]
-    ignore_file = root / ".gitgraphignore"
+    ignore_file = root / ".agentramenignore"
     if ignore_file.is_file():
         patterns.extend(
             line.strip()
@@ -752,13 +752,13 @@ def _embedding_model(model_name: str):
         try:
             from fastembed import TextEmbedding
         except ImportError as exc:
-            raise GitGraphError(
-                "Semantic search requires the optional dependency; install gitgraph[semantic]."
+            raise AgentRamenError(
+                "Semantic search requires the optional dependency; install agentramen[semantic]."
             ) from exc
         try:
             _EMBEDDING_MODELS[model_name] = TextEmbedding(model_name=model_name)
         except (OSError, ValueError, RuntimeError) as exc:
-            raise GitGraphError(f"Could not load embedding model '{model_name}': {exc}") from exc
+            raise AgentRamenError(f"Could not load embedding model '{model_name}': {exc}") from exc
     return _EMBEDDING_MODELS[model_name]
 
 
@@ -769,7 +769,7 @@ def _embed_texts(model_name: str, texts: list[str]) -> list[list[float]]:
     try:
         return [vector.tolist() for vector in model.embed(texts)]
     except (OSError, ValueError, RuntimeError) as exc:
-        raise GitGraphError(f"Could not generate semantic embeddings: {exc}") from exc
+        raise AgentRamenError(f"Could not generate semantic embeddings: {exc}") from exc
 
 
 def _sync_file_embeddings(root: Path, conn: sqlite3.Connection, model_name: str) -> None:
@@ -1034,17 +1034,17 @@ def _count_context_tokens(value: object, tokenizer_model: str) -> int:
         try:
             import tiktoken
         except ImportError as exc:
-            raise GitGraphError(
-                "Tokenizer counting requires the optional dependency; install gitgraph[tokenizer]."
+            raise AgentRamenError(
+                "Tokenizer counting requires the optional dependency; install agentramen[tokenizer]."
             ) from exc
         try:
             _TOKENIZERS[tokenizer_model] = tiktoken.encoding_for_model(tokenizer_model)
         except KeyError as exc:
-            raise GitGraphError(
+            raise AgentRamenError(
                 f"No tokenizer encoding is known for model '{tokenizer_model}'."
             ) from exc
         except Exception as exc:
-            raise GitGraphError(
+            raise AgentRamenError(
                 f"Could not initialize tokenizer for model '{tokenizer_model}': {exc}"
             ) from exc
     encoding = _TOKENIZERS[tokenizer_model]
@@ -1058,7 +1058,7 @@ def context_for(
     if budget is None:
         budget = config.default_budget
     if budget < 100:
-        raise GitGraphError("Token budget must be at least 100.")
+        raise AgentRamenError("Token budget must be at least 100.")
     task_terms = _terms(task)
     conn = connect(root)
     overlap_by_path: dict[str, set[str]] = {}
@@ -1487,7 +1487,7 @@ def explain_file(root: Path, path: str) -> dict[str, object]:
             ).fetchone()
     if row is None:
         conn.close()
-        raise GitGraphError(f"File is not indexed: {path}")
+        raise AgentRamenError(f"File is not indexed: {path}")
     language, size, symbols, imports, calls = row
     dependencies = [
         target.removeprefix("file:")
@@ -1547,12 +1547,12 @@ def graph_export(root: Path) -> dict[str, object]:
 def graph_at(root: Path, revision: str) -> dict[str, object]:
     """Reconstruct and cache the complete source graph for a Git commit."""
     if not revision or revision.startswith("-"):
-        raise GitGraphError("A valid commit or revision is required.")
+        raise AgentRamenError("A valid commit or revision is required.")
     resolved = git(
         root, "rev-parse", "--verify", "--end-of-options", f"{revision}^{{commit}}"
     ).strip()
     if not resolved:
-        raise GitGraphError(f"Unknown commit or revision: {revision}")
+        raise AgentRamenError(f"Unknown commit or revision: {revision}")
     conn = connect(root)
     cached = conn.execute(
         "SELECT config_hash, graph_json FROM graph_snapshots WHERE revision=?", (resolved,)
@@ -1603,7 +1603,7 @@ def graph_at(root: Path, revision: str) -> dict[str, object]:
         )
         if checked.returncode:
             conn.close()
-            raise GitGraphError(checked.stderr.strip() or "Could not inspect revision blobs.")
+            raise AgentRamenError(checked.stderr.strip() or "Could not inspect revision blobs.")
         for line in checked.stdout.splitlines():
             fields = line.split()
             if len(fields) == 3 and fields[1] == "blob":
@@ -1629,23 +1629,23 @@ def graph_at(root: Path, revision: str) -> dict[str, object]:
         )
         if fetched.returncode:
             conn.close()
-            raise GitGraphError(fetched.stderr.decode("utf-8", errors="replace").strip())
+            raise AgentRamenError(fetched.stderr.decode("utf-8", errors="replace").strip())
         output = fetched.stdout
         cursor = 0
         for (path, expected_id, language) in batch_entries:
             newline = output.find(b"\n", cursor)
             if newline < 0:
                 conn.close()
-                raise GitGraphError("Invalid Git object response while building graph snapshot.")
+                raise AgentRamenError("Invalid Git object response while building graph snapshot.")
             header = output[cursor:newline].split()
             if len(header) != 3 or header[0].decode("ascii") != expected_id:
                 conn.close()
-                raise GitGraphError("Unexpected Git object in graph snapshot.")
+                raise AgentRamenError("Unexpected Git object in graph snapshot.")
             try:
                 size = int(header[2])
             except ValueError as exc:
                 conn.close()
-                raise GitGraphError("Invalid Git object size in graph snapshot.") from exc
+                raise AgentRamenError("Invalid Git object size in graph snapshot.") from exc
             start = newline + 1
             end = start + size
             data = output[start:end]

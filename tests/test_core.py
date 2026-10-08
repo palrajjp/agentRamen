@@ -14,9 +14,11 @@ from gitgraph.core import (
     context_for,
     dependency_impact,
     explain_file,
+    GitGraphError,
     graph_export,
     hotspots,
     index_repository,
+    load_config,
     repo_search,
     repository_status,
 )
@@ -130,8 +132,75 @@ class GitGraphIndexTests(unittest.TestCase):
 
         index_repository(self.root)
 
-        self.assertEqual(repository_status(self.root)["files"], 2)
+        self.assertEqual(repository_status(self.root)["files"], 1)
         self.assertEqual(repo_search(self.root, "Hidden"), [])
+
+    def test_configuration_controls_history_retention_and_cochanges(self):
+        config_path = self.root / ".gitgraph.yml"
+        source = self.root / "module.py"
+        for index in range(3):
+            source.write_text(f"class Module{index}:\n    pass\n", encoding="utf-8")
+            self.commit(f"module change {index}")
+        config_path.write_text(
+            "git:\n  history: true\n  co_changes: false\n"
+            "history:\n  commits: 2\n"
+            "context:\n  default_budget: 400\n",
+            encoding="utf-8",
+        )
+
+        index_repository(self.root)
+        self.assertEqual(repository_status(self.root)["commits"], 2)
+        self.assertEqual(
+            context_for(self.root, "Module2")["token_budget"],
+            400,
+        )
+        conn = connect(self.root)
+        self.assertEqual(
+            conn.execute(
+                "SELECT COUNT(*) FROM graph_edges WHERE type='CO_CHANGED_WITH'"
+            ).fetchone()[0],
+            0,
+        )
+        conn.close()
+
+        config_path.write_text(
+            "git:\n  history: true\n  co_changes: true\n"
+            "history:\n  commits: 1\n",
+            encoding="utf-8",
+        )
+        index_repository(self.root)
+        self.assertEqual(repository_status(self.root)["commits"], 1)
+
+        config_path.write_text("git:\n  history: false\n", encoding="utf-8")
+        index_repository(self.root)
+        self.assertEqual(repository_status(self.root)["commits"], 0)
+        self.assertFalse(load_config(self.root).history_enabled)
+
+        config_path.write_text(
+            "git:\n  history: true\n  co_changes: true\nhistory:\n  commits: 2\n",
+            encoding="utf-8",
+        )
+        index_repository(self.root)
+        self.assertEqual(repository_status(self.root)["commits"], 2)
+
+    def test_non_incremental_configuration_reparses_all_files(self):
+        (self.root / "one.py").write_text("class One:\n    pass\n", encoding="utf-8")
+        (self.root / "two.py").write_text("class Two:\n    pass\n", encoding="utf-8")
+        self.commit("add files")
+        config = self.root / ".gitgraph.yml"
+        config.write_text("indexing:\n  incremental: false\n", encoding="utf-8")
+        index_repository(self.root)
+
+        result = index_repository(self.root)
+
+        self.assertEqual(result["indexed"], 2)
+
+    def test_invalid_context_budget_in_config_is_reported(self):
+        (self.root / ".gitgraph.yml").write_text(
+            "context:\n  default_budget: 10\n", encoding="utf-8"
+        )
+        with self.assertRaisesRegex(GitGraphError, "context.default_budget"):
+            load_config(self.root)
 
     def test_local_http_api_exposes_versioned_context(self):
         from gitgraph.server import create_server
@@ -170,13 +239,30 @@ class GitGraphIndexTests(unittest.TestCase):
         self.assertIn("uses: palrajjp/gitGraph/.github/workflows/index.yml@main", workflow)
 
     def test_mcp_exposes_context_tool(self):
+        (self.root / ".gitgraph.yml").write_text(
+            "context:\n  default_budget: 350\n", encoding="utf-8"
+        )
+        (self.root / "auth.py").write_text("class AuthService:\n    pass\n", encoding="utf-8")
+        self.commit("add auth")
         requests = [
             {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
             {"jsonrpc": "2.0", "method": "notifications/initialized"},
             {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+            {
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {"name": "repo_context", "arguments": {"task": "AuthService"}},
+            },
         ]
+        import_code = (
+            "import sys; "
+            f"sys.path.insert(0, {str(Path(__file__).resolve().parents[1])!r}); "
+            "from gitgraph.cli import main; "
+            "raise SystemExit(main(['mcp']))"
+        )
         response = subprocess.run(
-            [sys.executable, "-m", "gitgraph.cli", "mcp"],
+            [sys.executable, "-c", import_code],
             cwd=self.root,
             input="".join(json.dumps(item) + "\n" for item in requests),
             text=True,
@@ -184,9 +270,11 @@ class GitGraphIndexTests(unittest.TestCase):
             check=True,
         )
         results = [json.loads(line) for line in response.stdout.splitlines()]
-        tools = [tool["name"] for tool in results[-1]["result"]["tools"]]
+        tools = [tool["name"] for tool in results[-2]["result"]["tools"]]
         self.assertIn("repo_context", tools)
         self.assertIn("repo_graph", tools)
+        context = results[-1]["result"]["structuredContent"]
+        self.assertEqual(context["token_budget"], 350)
 
     def test_graph_tracks_imports_calls_and_history(self):
         (self.root / "auth.py").write_text(

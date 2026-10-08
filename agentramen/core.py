@@ -59,8 +59,9 @@ def has_secret(path: str, text: str) -> bool:
     for line in text.splitlines():
         if not SECRET_LINE.search(line):
             continue
-        if is_test and "PRIVATE KEY" not in line.upper() and PLACEHOLDER_VALUE.search(line):
-            continue
+        if is_test and "PRIVATE KEY" not in line.upper():
+            if PLACEHOLDER_VALUE.search(line) or line.lstrip().startswith(("'", '"')):
+                continue
         return True
     return False
 

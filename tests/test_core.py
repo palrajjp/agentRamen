@@ -205,6 +205,9 @@ class GitGraphIndexTests(unittest.TestCase):
     def test_local_http_api_exposes_versioned_context(self):
         from gitgraph.server import create_server
 
+        (self.root / ".gitgraph.yml").write_text(
+            "context:\n  default_budget: 500\n", encoding="utf-8"
+        )
         (self.root / "auth.py").write_text("class AuthService:\n    pass\n", encoding="utf-8")
         self.commit("add auth")
         index_repository(self.root)
@@ -217,14 +220,24 @@ class GitGraphIndexTests(unittest.TestCase):
                 architecture_value = json.load(response)
             request = Request(
                 address + "/api/v1/context",
-                data=json.dumps({"task": "AuthService", "token_budget": 500}).encode(),
+                data=json.dumps({"task": "AuthService"}).encode(),
                 headers={"Content-Type": "application/json"},
                 method="POST",
             )
             with urlopen(request) as response:
                 context_value = json.load(response)
+            override_request = Request(
+                address + "/api/v1/context",
+                data=json.dumps({"task": "AuthService", "token_budget": 300}).encode(),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urlopen(override_request) as response:
+                override_value = json.load(response)
             self.assertEqual(architecture_value["files"], 1)
             self.assertEqual(context_value["files"][0]["path"], "auth.py")
+            self.assertEqual(context_value["token_budget"], 500)
+            self.assertEqual(override_value["token_budget"], 300)
         finally:
             server.shutdown()
             server.server_close()
@@ -236,6 +249,7 @@ class GitGraphIndexTests(unittest.TestCase):
         config = (self.root / result["config"]).read_text(encoding="utf-8")
         workflow = (self.root / result["workflow"]).read_text(encoding="utf-8")
         self.assertIn("version: 1", config)
+        self.assertIn("commits: 100", config)
         self.assertIn("uses: palrajjp/gitGraph/.github/workflows/index.yml@main", workflow)
 
     def test_mcp_exposes_context_tool(self):

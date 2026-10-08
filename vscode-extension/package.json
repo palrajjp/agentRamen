@@ -1,29 +1,29 @@
 {
-  "name": "gitgraph-vscode",
-  "displayName": "GitGraph",
-  "description": "Persistent memory for your Git repo: task context, impact and history from the local GitGraph index.",
+  "name": "agentramen-vscode",
+  "displayName": "agentRamen",
+  "description": "Persistent memory for your Git repo: task context, impact and history from the local agentRamen index.",
   "version": "0.1.0",
   "publisher": "palrajjp",
   "license": "Apache-2.0",
-  "repository": { "type": "git", "url": "https://github.com/palrajjp/gitGraph.git" },
+  "repository": { "type": "git", "url": "https://github.com/palrajjp/agentRamen.git" },
   "engines": { "vscode": "^1.80.0" },
   "categories": ["Other"],
   "main": "./extension.js",
   "activationEvents": [],
   "contributes": {
     "commands": [
-      { "command": "gitgraph.index", "title": "GitGraph: Index Repository" },
-      { "command": "gitgraph.context", "title": "GitGraph: Find Context for Task" },
-      { "command": "gitgraph.impact", "title": "GitGraph: Show Impact of Current File" },
-      { "command": "gitgraph.history", "title": "GitGraph: Show History of Current File" }
+      { "command": "agentramen.index", "title": "agentRamen: Index Repository" },
+      { "command": "agentramen.context", "title": "agentRamen: Find Context for Task" },
+      { "command": "agentramen.impact", "title": "agentRamen: Show Impact of Current File" },
+      { "command": "agentramen.history", "title": "agentRamen: Show History of Current File" }
     ],
     "configuration": {
-      "title": "GitGraph",
+      "title": "agentRamen",
       "properties": {
-        "gitgraph.executable": {
+        "agentramen.executable": {
           "type": "string",
-          "default": "gitgraph",
-          "description": "Path to the gitgraph CLI."
+          "default": "agentramen",
+          "description": "Path to the agentramen CLI."
         }
       }
     }

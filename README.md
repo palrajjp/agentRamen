@@ -180,6 +180,72 @@ jobs:
 
 The reusable workflow fetches Git history, restores a cache, tests the installed package, indexes the checked-out revision, summarizes pull requests, and publishes the local SQLite artifact. Use a full-depth checkout when running the CLI outside this reusable workflow to retain history.
 
+### Use from `gha-cd` or another workflow
+
+Call the reusable workflow before a deployment or agent job. Supplying `task` also creates a bounded JSON context artifact; the workflow does not send repository content to an AI provider.
+
+```yaml
+jobs:
+  gitgraph:
+    uses: palrajjp/gitGraph/.github/workflows/index.yml@main
+    with:
+      task: "Trace the deployment workflow and identify rollback dependencies"
+      token_budget: 1200
+```
+
+The artifact is named `gitgraph-context-${{ github.sha }}`. A downstream job can fetch it and pass `.gitgraph-context/gitgraph-context.json` to its agent step:
+
+```yaml
+- uses: actions/download-artifact@v4
+  with:
+    name: gitgraph-context-${{ github.sha }}
+    path: .gitgraph-context
+```
+
+The context budget defaults to 2000 if omitted. Treat the artifact like source code: it can contain excerpts and follows the repository's GitHub Actions access and retention policy.
+
+## Agent integrations
+
+GitGraph's MCP server runs locally over stdio. Install GitGraph once on each developer machine, then add a portable `.mcp.json` at the repository root so VS Code Copilot and Claude Code can use the same configuration:
+
+```bash
+python -m pip install git+https://github.com/palrajjp/gitGraph.git
+```
+
+```json
+{
+  "mcpServers": {
+    "gitgraph": {
+      "type": "stdio",
+      "command": "gitgraph",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+For Claude Code, the project-scoped command creates or updates `.mcp.json`:
+
+```bash
+claude mcp add --transport stdio --scope project gitgraph -- gitgraph mcp
+```
+
+For GitHub Copilot CLI, save the same `mcpServers` object in `$COPILOT_HOME/mcp-config.json`, or `~/.copilot/mcp-config.json` when `COPILOT_HOME` is unset. See the [VS Code MCP configuration guide](https://code.visualstudio.com/docs/agent-customization/mcp-servers) and [Claude Code MCP guide](https://code.claude.com/docs/en/mcp) for client-specific setup and trust prompts.
+
+In VS Code, trust the workspace and start the `gitgraph` MCP server from the MCP Servers view. Each developer keeps an independent `.gitgraph/graph.db`; commit `.gitgraph.yml` and `.mcp.json` for shared settings, but do not put a live SQLite database on a network share.
+
+### Keep agent context focused
+
+Add an instruction like this to the project's `AGENTS.md`, `CLAUDE.md`, or Copilot instructions:
+
+> For repository analysis, call `repo_context` with the current task before broad file reads. Start with a 1200-token budget, use the returned paths as the investigation boundary, then call `repo_explain` or `repo_impact` for targeted follow-up. Expand the search only when the indexed context is insufficient. Ask for `gitgraph update` if the index appears stale.
+
+The budget caps retrieved context, not the model's entire conversation. Counts use an approximate character-based estimate by default; install `gitgraph[tokenizer]` and set `context.tokenizer_model` when model-specific counting is important. Run `gitgraph update` to incrementally refresh a developer's local index after changes.
+
+### ChatGPT and GPT Store
+
+Custom GPTs cannot start a developer's local stdio process. A GPT Action or hosted ChatGPT app needs a reachable HTTPS service with authentication. `gitgraph serve` binds to localhost and has no authentication, so do not expose it directly to the internet; a secure remote integration requires an authenticated gateway or a separately hosted MCP service. GPT creation and publishing availability depends on the current ChatGPT plan and workspace policy; see OpenAI's [GPT creation guide](https://help.openai.com/en/articles/8554397-creating-a-gpt).
+
 ## MCP
 
 Run `gitgraph mcp` from a repository and configure your MCP-compatible agent to launch that command in the repository working directory. Tools include `repo_context`, `repo_status`, `repo_history`, `repo_search`, `repo_explain`, `repo_impact`, `repo_dependencies`, `repo_tests`, `repo_changes`, `repo_architecture`, `repo_hotspots`, and `repo_graph`. The stdio server needs no API keys and does not access a network service.

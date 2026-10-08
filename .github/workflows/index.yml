@@ -2,7 +2,27 @@ name: GitGraph reusable index
 
 on:
   workflow_call:
+    inputs:
+      task:
+        description: Optional task to build bounded repository context for
+        required: false
+        type: string
+      token_budget:
+        description: Maximum context budget when task is supplied
+        required: false
+        type: number
+        default: 2000
   workflow_dispatch:
+    inputs:
+      task:
+        description: Optional task to build bounded repository context for
+        required: false
+        type: string
+      token_budget:
+        description: Maximum context budget when task is supplied
+        required: false
+        type: number
+        default: 2000
 
 permissions:
   contents: read
@@ -35,6 +55,20 @@ jobs:
           python -m pip install ./.gitgraph-action
           python -m unittest discover -s .gitgraph-action/tests -v
           gitgraph index --json
+      - name: Build task-specific context
+        if: inputs.task != ''
+        env:
+          GITGRAPH_TASK: ${{ inputs.task }}
+          GITGRAPH_TOKEN_BUDGET: ${{ inputs.token_budget }}
+        run: gitgraph context "$GITGRAPH_TASK" --budget "$GITGRAPH_TOKEN_BUDGET" --json > gitgraph-context.json
+      - name: Upload task context
+        if: inputs.task != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: gitgraph-context-${{ github.sha }}
+          path: gitgraph-context.json
+          if-no-files-found: error
+          retention-days: 14
       - name: Summarize pull request context
         if: github.event_name == 'pull_request'
         run: gitgraph pr --base "${{ github.event.pull_request.base.sha }}" --json | tee -a "$GITHUB_STEP_SUMMARY"

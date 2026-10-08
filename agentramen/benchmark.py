@@ -17,6 +17,7 @@ from .core import (
     _terms,
     context_for,
     connect,
+    dependency_impact,
     index_repository,
 )
 
@@ -151,6 +152,125 @@ def run_repository_benchmark(source_root: Path, semantic: bool = False) -> dict[
         return _measure(root, len(eligible), task, target, semantic)
 
 
+def run_quality_benchmark() -> dict[str, object]:
+    """Measure retrieval and affected-test accuracy on a deterministic labeled fixture."""
+    fixture = {
+        "src/auth/login_session_expiry.py": (
+            "class LoginSessionExpiry:\n"
+            "    def expire_login_session(self):\n"
+            "        return True\n"
+        ),
+        "src/billing/tax_rounding.py": (
+            "class TaxRounding:\n"
+            "    def round_invoice_tax(self):\n"
+            "        return 0\n"
+        ),
+        "src/billing/invoice.py": "from src.billing.tax_rounding import TaxRounding\n",
+        "tests/test_login_session_expiry.py": (
+            "from src.auth.login_session_expiry import LoginSessionExpiry\n\n"
+            "def test_login_session_expiry():\n"
+            "    assert LoginSessionExpiry().expire_login_session()\n"
+        ),
+        "tests/test_tax_rounding.py": (
+            "from src.billing.tax_rounding import TaxRounding\n\n"
+            "def test_tax_rounding():\n"
+            "    assert TaxRounding().round_invoice_tax() == 0\n"
+        ),
+        "tests/test_unrelated_notifications.py": (
+            "def test_notification_copy():\n    assert 'sent' == 'sent'\n"
+        ),
+    }
+    scenarios = [
+        {
+            "task": "change login session expiry behavior",
+            "target": "src/auth/login_session_expiry.py",
+            "relevant_files": [
+                "src/auth/login_session_expiry.py",
+                "tests/test_login_session_expiry.py",
+            ],
+            "affected_tests": ["tests/test_login_session_expiry.py"],
+        },
+        {
+            "task": "change invoice tax rounding",
+            "target": "src/billing/tax_rounding.py",
+            "relevant_files": [
+                "src/billing/tax_rounding.py",
+                "src/billing/invoice.py",
+                "tests/test_tax_rounding.py",
+            ],
+            "affected_tests": ["tests/test_tax_rounding.py"],
+        },
+    ]
+    with tempfile.TemporaryDirectory(prefix="agentramen-quality-reference-") as directory:
+        root = Path(directory)
+        _setup_git(root)
+        (root / ".gitignore").write_text(".agentramen/\n", encoding="utf-8")
+        _git(root, "add", ".gitignore")
+        _git(root, "commit", "-qm", "initialize reference fixture")
+        for relative, source in fixture.items():
+            path = root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(source, encoding="utf-8")
+        _git(root, "add", "src/auth/login_session_expiry.py", "tests/test_login_session_expiry.py")
+        _git(root, "commit", "-qm", "add login session expiry")
+        _git(root, "add", "src/billing/tax_rounding.py", "src/billing/invoice.py", "tests/test_tax_rounding.py")
+        _git(root, "commit", "-qm", "add invoice tax rounding")
+        _git(root, "add", "tests/test_unrelated_notifications.py")
+        _git(root, "commit", "-qm", "add notification tests")
+        index_repository(root)
+
+        results = []
+        for scenario in scenarios:
+            context = context_for(root, scenario["task"], 2000)
+            retrieved = [item["path"] for item in context["files"]]
+            expected_files = set(scenario["relevant_files"])
+            file_hits = expected_files & set(retrieved)
+            actual_tests = set(dependency_impact(root, scenario["target"])["tests"])
+            expected_tests = set(scenario["affected_tests"])
+            test_hits = expected_tests & actual_tests
+            evidence = [
+                item
+                for item in dependency_impact(root, scenario["target"])["test_associations"]
+                if item["path"] in expected_tests
+            ]
+            results.append(
+                {
+                    "task": scenario["task"],
+                    "target": scenario["target"],
+                    "expected_files": sorted(expected_files),
+                    "retrieved_files": retrieved,
+                    "file_precision": round(len(file_hits) / len(retrieved), 3)
+                    if retrieved
+                    else 0.0,
+                    "file_recall": round(len(file_hits) / len(expected_files), 3),
+                    "expected_tests": sorted(expected_tests),
+                    "confirmed_tests": sorted(actual_tests),
+                    "test_precision": round(len(test_hits) / len(actual_tests), 3)
+                    if actual_tests
+                    else 0.0,
+                    "test_recall": round(len(test_hits) / len(expected_tests), 3),
+                    "test_evidence": evidence,
+                }
+            )
+    return {
+        "scenario": "synthetic-labeled-quality-reference",
+        "scenarios": results,
+        "mean_file_precision": round(
+            sum(float(item["file_precision"]) for item in results) / len(results), 3
+        ),
+        "mean_file_recall": round(
+            sum(float(item["file_recall"]) for item in results) / len(results), 3
+        ),
+        "mean_test_precision": round(
+            sum(float(item["test_precision"]) for item in results) / len(results), 3
+        ),
+        "mean_test_recall": round(
+            sum(float(item["test_recall"]) for item in results) / len(results), 3
+        ),
+        "note": "Deterministic synthetic reference fixture; not a production-repository or cross-model accuracy guarantee.",
+    }
+
+
 def run_comparisons(
     file_counts: list[int],
     repository: Path | None,
@@ -211,12 +331,19 @@ def main(argv: list[str] | None = None) -> int:
         default="off",
         help="Benchmark semantic retrieval off, on, or in both modes",
     )
+    parser.add_argument(
+        "--quality",
+        action="store_true",
+        help="Measure task-to-file relevance and affected-test accuracy on a labeled reference fixture",
+    )
     args = parser.parse_args(argv)
     try:
         modes = (False, True) if args.semantic_mode == "both" else (
             args.semantic_mode == "on",
         )
         results = run_comparisons(args.files, args.repository, modes)
+        if args.quality:
+            results.append(run_quality_benchmark())
     except (OSError, ValueError, subprocess.CalledProcessError) as exc:
         parser.exit(1, f"agentramen-benchmark: {exc}\n")
     print(json.dumps(results, indent=2))

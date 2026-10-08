@@ -46,17 +46,17 @@ def _safe_relative_path(value: str) -> PurePosixPath:
 
 
 def _working_tree_changes(root: Path) -> list[str]:
-    status = git(root, "status", "--porcelain", "--untracked-files=all")
+    status = git(root, "status", "--short", "--untracked-files=all")
     changes = []
     for line in status.splitlines():
-        state, _, path = line.partition(" ")
-        path = path.strip()
+        state = line[:2].strip()
+        path = line[3:].strip()
         if state == "??" and (
             path in {".agentramen.yml", ".agentramenignore", ".agentramen"}
             or path.startswith(".agentramen/")
         ):
             continue
-        changes.append(line)
+        changes.append(f"{path} ({state or 'modified'})")
     return changes
 
 
@@ -70,8 +70,14 @@ def export_snapshot(root: Path, repository_id: str, output: Path) -> dict[str, o
         raise AgentRamenError("Cannot snapshot a repository without a Git commit.")
     changes = _working_tree_changes(root)
     if changes:
+        visible = ", ".join(changes[:20])
+        if len(changes) > 20:
+            visible += f", and {len(changes) - 20} more path(s)"
+        guidance = " Commit or discard these paths before exporting the pinned snapshot."
+        if any(".github/workflows/agentramen.yml" in item for item in changes):
+            guidance += " The agentramen init command may have generated .github/workflows/agentramen.yml; commit it or remove it locally."
         raise AgentRamenError(
-            "Snapshot export requires a clean checkout; commit or discard source changes first."
+            f"Snapshot export requires a clean checkout. Blocking paths: {visible}.{guidance}"
         )
 
     db_path = database_path(root)
@@ -97,6 +103,7 @@ def export_snapshot(root: Path, repository_id: str, output: Path) -> dict[str, o
                         "context_exclusion_rules",
                     ):
                         backup.execute(f"DELETE FROM {table}")
+                backup.execute("VACUUM")
             finally:
                 backup.close()
             database_bytes = database_copy.read_bytes()
@@ -176,6 +183,20 @@ def export_snapshot(root: Path, repository_id: str, output: Path) -> dict[str, o
         "archive": str(output),
         "bytes": output.stat().st_size,
     }
+
+
+def verify_snapshot(archive_path: Path, expected_repository_id: str) -> dict[str, object]:
+    """Fully validate a candidate archive before CI promotes it to central service."""
+    with mounted_snapshot(archive_path, expected_repository_id) as (root, manifest):
+        return {
+            "valid": True,
+            "repository_id": manifest["repository_id"],
+            "commit": manifest["commit"],
+            "indexed_files": len(manifest["indexed_files"]),
+            "shared_memories": len(manifest["shared_memory_ids"]),
+            "bytes": archive_path.expanduser().resolve().stat().st_size,
+            "private_local_memory_tables": 0,
+        }
 
 
 @contextmanager

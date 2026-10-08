@@ -298,6 +298,10 @@ def connect(root: Path) -> sqlite3.Connection:
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS index_exclusions (
+            path TEXT PRIMARY KEY,
+            reason TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS graph_nodes (
             id TEXT PRIMARY KEY,
             type TEXT NOT NULL,
@@ -840,7 +844,7 @@ def _sync_file_embeddings(root: Path, conn: sqlite3.Connection, model_name: str)
         )
 
 
-def index_repository(root: Path) -> dict[str, int]:
+def index_repository(root: Path) -> dict[str, object]:
     root = root.resolve()
     config = load_config(root)
     conn = connect(root)
@@ -882,6 +886,13 @@ def index_repository(root: Path) -> dict[str, int]:
         to_check.update(_tracked_and_new_paths(root) - set(previous))
     to_check = {p for p in to_check if not is_ignored(p, patterns)}
     tracked_after = _tracked_and_new_paths(root)
+    previous_exclusions = {
+        row[0] for row in conn.execute("SELECT path FROM index_exclusions")
+    }
+    stale_exclusions = {
+        path for path in previous_exclusions
+        if path not in tracked_after or is_ignored(path, patterns)
+    }
     deleted = {
         path for path in previous
         if path not in tracked_after or is_ignored(path, patterns)
@@ -889,6 +900,11 @@ def index_repository(root: Path) -> dict[str, int]:
     }
     updated = removed = 0
     with conn:
+        if stale_exclusions:
+            conn.executemany(
+                "DELETE FROM index_exclusions WHERE path=?",
+                [(path,) for path in stale_exclusions],
+            )
         _commit_history(
             root,
             conn,
@@ -906,14 +922,33 @@ def index_repository(root: Path) -> dict[str, int]:
             if not full_path.is_file() or full_path.is_symlink():
                 conn.execute("DELETE FROM files WHERE path=?", (path,))
                 changed_graph_paths.add(path)
+                if full_path.is_symlink():
+                    conn.execute(
+                        "INSERT INTO index_exclusions(path, reason) VALUES (?, ?) "
+                        "ON CONFLICT(path) DO UPDATE SET reason=excluded.reason",
+                        (path, "symbolic links are not indexed"),
+                    )
+                else:
+                    conn.execute("DELETE FROM index_exclusions WHERE path=?", (path,))
                 continue
             try:
                 data = full_path.read_bytes()
             except OSError:
+                conn.execute(
+                    "INSERT INTO index_exclusions(path, reason) VALUES (?, ?) "
+                    "ON CONFLICT(path) DO UPDATE SET reason=excluded.reason",
+                    (path, "file could not be read"),
+                )
                 continue
             if len(data) > 2_000_000 or b"\0" in data:
                 conn.execute("DELETE FROM files WHERE path=?", (path,))
                 changed_graph_paths.add(path)
+                reason = "file exceeds 2 MB size limit" if len(data) > 2_000_000 else "binary file"
+                conn.execute(
+                    "INSERT INTO index_exclusions(path, reason) VALUES (?, ?) "
+                    "ON CONFLICT(path) DO UPDATE SET reason=excluded.reason",
+                    (path, reason),
+                )
                 continue
             digest = hashlib.sha256(data).hexdigest()
             if config.incremental and not force_reindex and previous.get(path) == digest:
@@ -923,6 +958,11 @@ def index_repository(root: Path) -> dict[str, int]:
                 LOGGER.warning("excluded %s from index: credential-like content detected", path)
                 conn.execute("DELETE FROM files WHERE path=?", (path,))
                 changed_graph_paths.add(path)
+                conn.execute(
+                    "INSERT INTO index_exclusions(path, reason) VALUES (?, ?) "
+                    "ON CONFLICT(path) DO UPDATE SET reason=excluded.reason",
+                    (path, "credential-like content detected"),
+                )
                 continue
             language = LANGUAGES.get(Path(path).suffix.lower())
             analysis = analyze(path, text, language)
@@ -941,6 +981,7 @@ def index_repository(root: Path) -> dict[str, int]:
                     json.dumps(analysis.calls),
                 ),
             )
+            conn.execute("DELETE FROM index_exclusions WHERE path=?", (path,))
             changed_graph_paths.add(path)
             updated += 1
         _sync_graph(conn, changed_graph_paths)
@@ -954,8 +995,32 @@ def index_repository(root: Path) -> dict[str, int]:
     if config.semantic_enabled:
         _sync_file_embeddings(root, conn, config.embedding_model)
     file_count = conn.execute("SELECT COUNT(*) FROM files").fetchone()[0]
+    excluded_files = [
+        {"path": path, "reason": reason}
+        for path, reason in conn.execute(
+            "SELECT path, reason FROM index_exclusions ORDER BY path"
+        ).fetchall()
+    ]
+    indexed_paths = {
+        row[0] for row in conn.execute("SELECT path FROM files").fetchall()
+    }
     conn.close()
-    return {"indexed": updated, "removed": removed, "files": file_count}
+    eligible_paths = {
+        path for path in tracked_after if not is_ignored(path, patterns)
+    }
+    ignored_files = len(tracked_after - eligible_paths)
+    unclassified = max(
+        0, len(eligible_paths - indexed_paths - {item["path"] for item in excluded_files})
+    )
+    return {
+        "indexed": updated,
+        "removed": removed,
+        "files": file_count,
+        "excluded_count": len(excluded_files),
+        "excluded_files": excluded_files,
+        "ignored_files": ignored_files,
+        "not_indexed_files": unclassified,
+    }
 
 
 def repository_status(root: Path) -> dict[str, object]:
@@ -967,12 +1032,37 @@ def repository_status(root: Path) -> dict[str, object]:
     ).fetchall()
     latest = conn.execute("SELECT value FROM metadata WHERE key='last_commit'").fetchone()
     commits = conn.execute("SELECT COUNT(*) FROM commits").fetchone()[0]
+    excluded_files = [
+        {"path": path, "reason": reason}
+        for path, reason in conn.execute(
+            "SELECT path, reason FROM index_exclusions ORDER BY path"
+        ).fetchall()
+    ]
+    indexed_paths = {
+        row[0] for row in conn.execute("SELECT path FROM files").fetchall()
+    }
     conn.close()
+    patterns = _ignore_patterns(root)
+    if git(root, "rev-parse", "--show-toplevel", check=False).strip():
+        tracked = _tracked_and_new_paths(root)
+        eligible = {path for path in tracked if not is_ignored(path, patterns)}
+        ignored_files = len(tracked - eligible)
+    else:
+        tracked = indexed_paths | {item["path"] for item in excluded_files}
+        eligible = tracked
+        ignored_files = 0
+    not_indexed = max(
+        0, len(eligible - indexed_paths - {item["path"] for item in excluded_files})
+    )
     return {
         "files": count,
         "languages": dict(languages),
         "last_commit": latest[0] if latest else None,
         "commits": commits,
+        "excluded_count": len(excluded_files),
+        "excluded_files": excluded_files,
+        "ignored_files": ignored_files,
+        "not_indexed_files": not_indexed,
     }
 
 
@@ -1348,7 +1438,70 @@ def _context_for_baseline(
 def context_for(root: Path, task: str, budget: int | None = None) -> dict[str, object]:
     from .retriever.context import context_for as retrieve_context
 
-    return retrieve_context(root, task, budget)
+    result = retrieve_context(root, task, budget)
+    from .memory import search_shared_memories
+
+    matches = search_shared_memories(root, task, limit=20)
+    if not matches:
+        return result
+
+    config = load_config(root)
+    token_budget = int(result["token_budget"])
+    memory_budget = min(token_budget, max(100, token_budget // 4))
+    selected_memories: list[dict[str, object]] = []
+    for item in matches:
+        memory = {
+            key: item[key]
+            for key in (
+                "id",
+                "subject",
+                "content",
+                "category",
+                "source",
+                "epistemic_status",
+                "valid_from",
+                "valid_to",
+                "importance_score",
+                "path",
+            )
+        }
+        candidate = [*selected_memories, memory]
+        if _count_context_tokens(
+            {"team_memories": candidate}, config.tokenizer_model
+        ) <= memory_budget:
+            selected_memories.append(memory)
+
+    compact_files: list[dict[str, object]] = []
+    selected_files: list[dict[str, object]] = []
+    for item in result["files"]:
+        compact = {key: value for key, value in item.items() if key != "estimated_tokens"}
+        candidate = [*compact_files, compact]
+        total = _count_context_tokens(
+            {"files": candidate, "team_memories": selected_memories},
+            config.tokenizer_model,
+        )
+        if total <= token_budget:
+            compact_files.append(compact)
+            selected_files.append(item)
+
+    result["files_avoided"] = int(result["files_avoided"]) + len(result["files"]) - len(selected_files)
+    result["files"] = [
+        {
+            **item,
+            "estimated_tokens": _count_context_tokens(item, config.tokenizer_model),
+        }
+        for item in selected_files
+    ]
+    result["team_memories"] = selected_memories
+    result["team_memories_avoided"] = len(matches) - len(selected_memories)
+    result["estimated_tokens"] = _count_context_tokens(
+        {"files": compact_files, "team_memories": selected_memories},
+        config.tokenizer_model,
+    )
+    result["confidence"] = (
+        "high" if len(selected_files) >= 3 else "medium" if selected_files else "low"
+    )
+    return result
 
 
 def repo_search(root: Path, query: str, limit: int = 20) -> list[dict[str, object]]:
@@ -1486,21 +1639,60 @@ def dependency_impact(root: Path, target: str, depth: int = 3) -> dict[str, obje
     dependents = find_dependents(root, report["path"], depth)
     direct = [item["path"] for item in dependents if item["depth"] == 1]
     indirect = [item["path"] for item in dependents if item["depth"] > 1]
-    terms = _terms(" ".join(report["symbols"]) + " " + report["path"])
     conn = connect(root)
-    candidates = [row[0] for row in conn.execute("SELECT path FROM files")]
-    conn.close()
-    tests = [
-        path for path in candidates
-        if ("test" in path.lower() or path.lower().endswith("_spec.py"))
-        and (not terms or bool(terms & _terms(path)))
+    indexed_tests = {
+        row[0]
+        for row in conn.execute("SELECT path FROM files")
+        if TEST_PATH.search(row[0])
+    }
+    edges = conn.execute(
+        "SELECT source, target FROM graph_edges WHERE type='DEPENDS_ON'"
+    ).fetchall()
+    excluded_tests = [
+        {"path": path, "reason": reason, "confidence": "not_assessed"}
+        for path, reason in conn.execute(
+            "SELECT path, reason FROM index_exclusions ORDER BY path"
+        )
+        if TEST_PATH.search(path)
     ]
+    conn.close()
+    dependencies_by_source: dict[str, set[str]] = {}
+    for source_id, target_id in edges:
+        source_path = source_id.removeprefix("file:")
+        target_path = target_id.removeprefix("file:")
+        dependencies_by_source.setdefault(source_path, set()).add(target_path)
+
+    test_associations = []
+    for test_path in sorted(indexed_tests):
+        pending = [(test_path, [test_path])]
+        visited = {test_path}
+        evidence = None
+        while pending:
+            current, chain = pending.pop(0)
+            if current == report["path"]:
+                evidence = chain
+                break
+            for dependency in sorted(dependencies_by_source.get(current, set())):
+                if dependency not in visited:
+                    visited.add(dependency)
+                    pending.append((dependency, [*chain, dependency]))
+        if evidence:
+            test_associations.append(
+                {
+                    "path": test_path,
+                    "confidence": "confirmed",
+                    "depth": len(evidence) - 1,
+                    "evidence": evidence,
+                }
+            )
     return {
         "target": report["path"],
         "direct_dependents": direct,
         "indirect_dependents": indirect,
         "dependencies": report["dependencies"],
-        "tests": sorted(tests),
+        "tests": [item["path"] for item in test_associations],
+        "test_associations": test_associations,
+        "unindexed_test_candidates": excluded_tests,
         "co_changes": report["co_changes"],
         "history": report["history"],
         "estimated_impact": len(dependents),

@@ -78,6 +78,11 @@ jobs:
         env:
           AGENTRAMEN_REPOSITORY_ID: ${{ inputs.repository_id }}
         run: agentramen snapshot export --repository-id "$AGENTRAMEN_REPOSITORY_ID" --output "$RUNNER_TEMP/agentramen-snapshot.zip" --json
+      - name: Validate centralized MCP snapshot
+        if: inputs.central_snapshot
+        env:
+          AGENTRAMEN_REPOSITORY_ID: ${{ inputs.repository_id }}
+        run: agentramen snapshot verify --repository-id "$AGENTRAMEN_REPOSITORY_ID" --archive "$RUNNER_TEMP/agentramen-snapshot.zip" --json | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Upload centralized MCP snapshot
         if: inputs.central_snapshot
         uses: actions/upload-artifact@v4

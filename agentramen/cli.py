@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 from . import __version__
-from .benchmark import run_comparisons
+from .benchmark import run_comparisons, run_quality_benchmark
 from .core import (
     AgentRamenError,
     architecture,
@@ -37,7 +37,7 @@ from .memory import (
     search_shared_memories,
     stage_memory,
 )
-from .snapshots import export_snapshot, mounted_snapshot
+from .snapshots import export_snapshot, mounted_snapshot, verify_snapshot
 
 def _output(value: object, as_json: bool = False) -> None:
     if as_json:
@@ -425,6 +425,11 @@ def main(argv: list[str] | None = None) -> int:
     benchmark.add_argument(
         "--semantic-mode", choices=("off", "on", "both"), default="off"
     )
+    benchmark.add_argument(
+        "--quality",
+        action="store_true",
+        help="Measure task-to-file relevance and affected-test accuracy on a labeled reference fixture",
+    )
     benchmark.add_argument("--json", action="store_true")
     memory = subparsers.add_parser("memory", help="Review and share repository memories")
     memory_actions = memory.add_subparsers(dest="memory_action", required=True)
@@ -441,6 +446,10 @@ def main(argv: list[str] | None = None) -> int:
     snapshot_export.add_argument("--repository-id", required=True)
     snapshot_export.add_argument("--output", type=Path, required=True)
     snapshot_export.add_argument("--json", action="store_true")
+    snapshot_verify = snapshot_actions.add_parser("verify", help="Validate a central-service snapshot")
+    snapshot_verify.add_argument("--repository-id", required=True)
+    snapshot_verify.add_argument("--archive", type=Path, required=True)
+    snapshot_verify.add_argument("--json", action="store_true")
     remote = subparsers.add_parser("mcp-http", help="Serve a snapshot over authenticated Streamable HTTP")
     remote.add_argument("--snapshot-archive", type=Path, required=True)
     remote.add_argument("--repository-id", required=True)
@@ -544,13 +553,18 @@ def main(argv: list[str] | None = None) -> int:
                 args.semantic_mode == "on",
             )
             value = run_comparisons(args.files, args.repository, modes)
+            if args.quality:
+                value.append(run_quality_benchmark())
         elif args.command == "memory":
             if args.memory_action == "publish":
                 value = publish_shared_memory(root, args.memory_id)
             else:
                 value = search_shared_memories(root, args.query, args.limit)
         elif args.command == "snapshot":
-            value = export_snapshot(root, args.repository_id, args.output)
+            if args.snapshot_action == "export":
+                value = export_snapshot(root, args.repository_id, args.output)
+            else:
+                value = verify_snapshot(args.archive, args.repository_id)
         elif args.command == "serve":
             from .server import serve as serve_api
 

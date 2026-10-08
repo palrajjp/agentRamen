@@ -8,6 +8,8 @@
 [![Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-4C8BF5.svg)](LICENSE)
 [![GitHub stars](https://img.shields.io/github/stars/palrajjp/agentRamen?style=social)](https://github.com/palrajjp/agentRamen/stargazers)
 
+Apache-2.0 licensed. See the [security policy](SECURITY.md) and [community code of conduct](CODE_OF_CONDUCT.md).
+
 agentRamen indexes source structure and Git history, then retrieves task-relevant files and excerpts. It is local-first by default: each developer keeps a private SQLite index. Teams can optionally publish sanitized, commit-pinned snapshots to a centrally hosted, OIDC-protected read-only MCP service.
 
 ## Quick start
@@ -247,7 +249,15 @@ Run `agentramen mcp` from a repository and configure your MCP-compatible agent t
 
 ## Benchmarking
 
-Run `agentramen benchmark --files 10 1000` to measure synthetic initial indexing, a one-file incremental update, and context retrieval. Add `--repository /path/to/repo` to measure a temporary copy of a real repository's tracked working-tree files as well. Use `--semantic-mode both` to compare semantic retrieval off/on; the enabled run requires `agentramen[semantic]` and downloads its configured model if needed. If model setup is unavailable, the comparison reports that mode as an error and still returns measurements for the successful mode. Output includes lexical candidate count, database size, and retrieval/index timings. Results are local measurements, not cross-machine guarantees.
+Run `agentramen benchmark --files 10 1000` to measure synthetic initial indexing, a one-file incremental update, and context retrieval. Add `--repository /path/to/repo` to measure a temporary copy of a real repository's tracked working-tree files as well. Use `--semantic-mode both` to compare semantic retrieval off/on; the enabled run requires `agentramen[semantic]` and downloads its configured model if needed. If model setup is unavailable, the comparison reports that mode as an error and still returns measurements for the successful mode. Output includes lexical candidate count, database size, and retrieval/index timings.
+
+Add `--quality` to report task-to-file and affected-test precision/recall on a deterministic, labeled synthetic fixture; `test_evidence` shows the import chain used to confirm each suggested test:
+
+```bash
+agentramen benchmark --quality --json
+```
+
+The current fixture scores 1.0 mean precision and recall for both files and tests. This is a fixture correctness check, not a real-repository accuracy claim. For adoption decisions, curate labels from your own repository and measure those tasks; all timings and scores depend on the repo, task labels, and environment.
 
 ## Privacy and exclusions
 
@@ -285,7 +295,7 @@ jobs:
       repository_id: acme/payments-monorepo
 ```
 
-The workflow uploads `agentramen-snapshot-${{ github.sha }}`. It contains the pinned graph, hash-verified indexed source that passed credential filtering, and committed team memories. Developer-private SQLite memories and local exclusion rules are stripped. Artifacts expire after 14 days, so copy accepted snapshots to private durable company storage before expiry.
+The workflow validates the archive with `agentramen snapshot verify` before uploading `agentramen-snapshot-${{ github.sha }}`. It contains the pinned graph, hash-verified indexed source that passed credential filtering, and committed team memories. Developer-private SQLite memories and local exclusion rules are stripped. Artifacts expire after 14 days, so copy accepted snapshots to private durable company storage before expiry. If `agentramen init` generated `.github/workflows/agentramen.yml`, commit that file before exporting; snapshot export requires a clean source checkout.
 
 Deploy one read-only MCP service per repository snapshot. It validates company OIDC JWTs against JWKS, issuer, audience, expiry, scope, and optionally group claims; DNS-rebinding protection requires an explicit Host allowlist. Terminate TLS at a trusted ingress and keep the archive and mounted snapshot inside company-controlled infrastructure.
 
@@ -306,7 +316,11 @@ agentramen mcp-http \
 
 Configure MCP clients to use the HTTPS `/mcp` endpoint and complete the company OAuth/OIDC flow. For example, Claude Code can add it with `claude mcp add --transport http agentramen-central https://agentramen.example.com/mcp`; VS Code supports remote HTTP MCP servers. Set `AGENTRAMEN_OIDC_GROUP_CLAIM` when your IdP uses a different group claim (default `groups`).
 
-Remote tools are read-only: status, context, search, architecture, graph, and approved team-memory search. Roll the service when CI publishes a new snapshot. `agentramen mcp-http` currently runs one process; larger deployments should place it behind a process manager/load balancer and provide an atomically updated snapshot mount. This is a deployment building block, not a cloud-specific object-store uploader or multi-tenant SaaS control plane. Snapshot source is still company code; heuristic secret filtering is not a replacement for ACLs and data-loss review.
+Remote tools are read-only: status, context, search, architecture, graph, and approved team-memory search. Every response includes `repository_id` and `snapshot_commit` so agents can identify stale advice.
+
+For deployment freshness and rollback, keep each accepted archive immutable and keyed by commit SHA. Verify it, start a candidate service against that archive, and call `repo_status` with an authorized client to confirm the expected commit. Promote by atomically switching the ingress/service pointer to the candidate; retain the previous service/archive and roll back by switching the pointer back. Do not overwrite the archive beneath a running service. `agentramen mcp-http` runs one process; use your platform's process manager/load balancer and a shared read-only snapshot mount for replicas. Cloud-specific storage upload and pointer switching are deployment-pipeline responsibilities, not built into this package.
+
+Snapshots contain sanitized but real source code. Credential heuristics are not a substitute for repository ACLs or data-loss review; use private company-controlled storage with retention and access controls matching the source repository.
 
 ## Known limitations
 
@@ -323,4 +337,4 @@ python -m unittest discover -s tests -v
 python -m agentramen.cli status --json
 ```
 
-If agentRamen is useful in your workflow, [a GitHub star](https://github.com/palrajjp/agentRamen/stargazers) helps other developers find it. Contributions that add language analyzers should keep parser-specific behavior separate from the indexing and context interfaces; see [CONTRIBUTING.md](CONTRIBUTING.md).
+If agentRamen is useful in your workflow, [a GitHub star](https://github.com/palrajjp/agentRamen/stargazers) helps other developers find it. See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md). Contributions that add language analyzers should keep parser-specific behavior separate from the indexing and context interfaces.

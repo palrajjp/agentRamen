@@ -153,6 +153,13 @@ class AgentRamenIndexTests(unittest.TestCase):
         self.assertEqual(json.loads(first_file.read_text(encoding="utf-8"))["epistemic_status"], "SUPERSEDED")
         results = search_shared_memories(self.root, "OAuth provider")
         self.assertEqual([item["id"] for item in results], [second])
+        context = context_for(self.root, "OAuthProvider authentication service", 1000)
+        self.assertEqual(context["team_memories"][0]["id"], second)
+        self.assertEqual(context["team_memories"][0]["source"], "team note")
+        self.assertEqual(context["team_memories"][0]["epistemic_status"], "VERIFIED")
+        self.assertIsNotNone(context["team_memories"][0]["valid_from"])
+        self.assertIsNone(context["team_memories"][0]["valid_to"])
+        self.assertLessEqual(context["estimated_tokens"], context["token_budget"])
         self.assertEqual(index_repository(self.root)["files"], 2)
         graph_paths = {
             node["path"] for node in graph_export(self.root)["nodes"] if node["type"] == "File"
@@ -191,7 +198,9 @@ class AgentRamenIndexTests(unittest.TestCase):
             publish_shared_memory(self.root, source_credential)
 
     def test_central_snapshot_excludes_private_memory_and_includes_shared_memory(self):
-        from agentramen.snapshots import export_snapshot, mounted_snapshot
+        import zipfile
+
+        from agentramen.snapshots import export_snapshot, mounted_snapshot, verify_snapshot
 
         (self.root / ".gitignore").write_text(".agentramen/\n", encoding="utf-8")
         (self.root / "auth.py").write_text("class AuthService: pass\n", encoding="utf-8")
@@ -201,7 +210,8 @@ class AgentRamenIndexTests(unittest.TestCase):
         self.commit("add auth and credential-like source")
         index_repository(self.root)
 
-        private_id = stage_memory(self.root, "personal note", "Keep this local only")
+        private_sentinel = "AGENTRAMEN_PRIVATE_MEMORY_SENTINEL_7fc5a31d"
+        private_id = stage_memory(self.root, "personal note", private_sentinel)
         approve_memory(self.root, private_id)
         shared_id = stage_memory(
             self.root, "authentication provider", "Use OAuthProvider", source="reviewed team note"
@@ -218,6 +228,14 @@ class AgentRamenIndexTests(unittest.TestCase):
         info = export_snapshot(self.root, "company/auth-service", snapshot)
         self.assertEqual(info["indexed_files"], 2)
         self.assertEqual(info["shared_memories"], 1)
+        verification = verify_snapshot(snapshot, "company/auth-service")
+        self.assertTrue(verification["valid"])
+        self.assertEqual(verification["commit"], info["commit"])
+        with self.assertRaisesRegex(AgentRamenError, "does not match"):
+            verify_snapshot(snapshot, "company/other-repo")
+        with zipfile.ZipFile(snapshot) as archive:
+            graph_bytes = archive.read(".agentramen/graph.db")
+        self.assertNotIn(private_sentinel.encode("utf-8"), graph_bytes)
 
         with mounted_snapshot(snapshot, "company/auth-service") as (snapshot_root, manifest):
             self.assertEqual(manifest["repository_id"], "company/auth-service")
@@ -233,21 +251,27 @@ class AgentRamenIndexTests(unittest.TestCase):
         try:
             import jwt
             from agentramen.remote_mcp import OIDCVerifier, create_remote_server
+            from agentramen.snapshots import export_snapshot, mounted_snapshot
             from cryptography.hazmat.primitives.asymmetric import rsa
             from mcp.server.transport_security import TransportSecuritySettings
             from starlette.testclient import TestClient
         except ImportError:
             self.skipTest("Install agentramen[central] to test remote MCP")
 
+        (self.root / ".gitignore").write_text(".agentramen/\n", encoding="utf-8")
         (self.root / "auth.py").write_text("class AuthService: pass\n", encoding="utf-8")
         self.commit("add auth service")
         index_repository(self.root)
+        snapshot = self.root.with_name(self.root.name + "-remote.zip")
+        self.addCleanup(snapshot.unlink, missing_ok=True)
+        export_snapshot(self.root, "company/auth-service", snapshot)
+        snapshot_context = mounted_snapshot(snapshot, "company/auth-service")
+        snapshot_root, manifest = snapshot_context.__enter__()
+        self.addCleanup(snapshot_context.__exit__, None, None, None)
         server = create_remote_server(
-            self.root,
+            snapshot_root,
             repository_id="company/auth-service",
-            snapshot_commit=subprocess.check_output(
-                ["git", "-C", str(self.root), "rev-parse", "HEAD"], text=True
-            ).strip(),
+            snapshot_commit=str(manifest["commit"]),
             issuer="https://issuer.example.com/tenant",
             jwks_url="https://issuer.example.com/tenant/keys",
             audience="agentramen-api",
@@ -264,9 +288,12 @@ class AgentRamenIndexTests(unittest.TestCase):
         context_result = asyncio.run(
             server.call_tool("repo_context", {"task": "AuthService", "token_budget": 500})
         )
-        self.assertEqual(
-            context_result.structured_content["files"][0]["path"], "auth.py"
-        )
+        self.assertEqual(context_result.structured_content["files"][0]["path"], "auth.py")
+        self.assertEqual(context_result.structured_content["repository_id"], "company/auth-service")
+        self.assertEqual(context_result.structured_content["snapshot_commit"], manifest["commit"])
+        status_result = asyncio.run(server.call_tool("repo_status", {}))
+        self.assertEqual(status_result.structured_content["snapshot_commit"], manifest["commit"])
+        self.assertEqual(status_result.structured_content["files"], 2)
 
         issuer = "https://issuer.example.com/tenant"
         audience = "agentramen-api"
@@ -366,8 +393,23 @@ class AgentRamenIndexTests(unittest.TestCase):
         )
         conn.commit()
         conn.close()
-
         self.assertEqual(context_for(self.root, "AuthService")["files"], [])
+
+    def test_snapshot_export_names_init_generated_workflow_blocker(self):
+        from agentramen.snapshots import export_snapshot
+
+        (self.root / "auth.py").write_text("class AuthService: pass\n", encoding="utf-8")
+        self.commit("add auth service")
+        index_repository(self.root)
+        workflow = self.root / ".github" / "workflows" / "agentramen.yml"
+        workflow.parent.mkdir(parents=True)
+        workflow.write_text("name: agentRamen\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(
+            AgentRamenError,
+            r"may have generated \.github/workflows/agentramen\.yml",
+        ):
+            export_snapshot(self.root, "company/auth-service", self.root / "snapshot.zip")
 
     def test_update_indexes_only_changed_file_and_removes_deleted_file(self):
         (self.root / "auth.py").write_text("class Auth:\n    pass\n", encoding="utf-8")
@@ -494,8 +536,31 @@ class AgentRamenIndexTests(unittest.TestCase):
         )
         self.commit("add real-looking")
         with self.assertLogs("agentramen", level="WARNING"):
-            index_repository(self.root)
+            result = index_repository(self.root)
         self.assertEqual(repository_status(self.root)["files"], 0)
+        self.assertEqual(result["excluded_files"], [
+            {"path": "tests/test_auth.py", "reason": "credential-like content detected"}
+        ])
+        status = repository_status(self.root)
+        self.assertEqual(status["excluded_count"], 1)
+        self.assertEqual(status["excluded_files"], result["excluded_files"])
+        self.assertEqual(status["not_indexed_files"], 0)
+
+    def test_index_diagnostic_clears_after_excluded_file_is_fixed(self):
+        secret_file = self.root / "credentials.py"
+        secret_file.write_text(
+            "api_key = 'Zq81hTr0Pw93LkdUv72Mx'\n", encoding="utf-8"
+        )
+        self.commit("add credential-like file")
+        with self.assertLogs("agentramen", level="WARNING"):
+            first = index_repository(self.root)
+        self.assertEqual(first["excluded_count"], 1)
+
+        secret_file.write_text("class Credentials: pass\n", encoding="utf-8")
+        updated = index_repository(self.root)
+        self.assertEqual(updated["files"], 1)
+        self.assertEqual(updated["excluded_count"], 0)
+        self.assertEqual(repository_status(self.root)["excluded_files"], [])
 
     def test_configured_ignore_patterns_are_applied(self):
         (self.root / ".agentramen.yml").write_text("ignore:\n  - private/\n", encoding="utf-8")
@@ -697,6 +762,18 @@ class AgentRamenIndexTests(unittest.TestCase):
         self.assertFalse(result[0]["semantic_enabled"])
         self.assertTrue(result[1]["semantic_enabled"])
         self.assertEqual(result[1]["error"], "embedding model unavailable")
+
+    def test_labeled_quality_benchmark_reports_relevance_and_test_accuracy(self):
+        from agentramen.benchmark import run_quality_benchmark
+
+        result = run_quality_benchmark()
+
+        self.assertEqual(result["scenario"], "synthetic-labeled-quality-reference")
+        self.assertEqual(result["mean_file_precision"], 1.0)
+        self.assertEqual(result["mean_file_recall"], 1.0)
+        self.assertEqual(result["mean_test_precision"], 1.0)
+        self.assertEqual(result["mean_test_recall"], 1.0)
+        self.assertTrue(result["scenarios"][0]["test_evidence"])
 
     def test_local_http_api_exposes_versioned_context(self):
         from agentramen.server import create_server
@@ -925,6 +1002,57 @@ class AgentRamenIndexTests(unittest.TestCase):
         self.assertEqual(impact["indirect_dependents"], ["dashboard.py"])
         context = context_for(self.root, "AuthService views")
         self.assertTrue(context["files"])
+
+    def test_affected_test_suggestions_use_import_evidence(self):
+        (self.root / "src").mkdir()
+        (self.root / "tests").mkdir()
+        (self.root / "src" / "auth_service.ts").write_text(
+            "export class AuthService {}\n", encoding="utf-8"
+        )
+        (self.root / "src" / "billing.ts").write_text(
+            "export class BillingService {}\n", encoding="utf-8"
+        )
+        (self.root / "tests" / "auth_service.test.ts").write_text(
+            'import { AuthService } from "../src/auth_service";\n'
+            "test('auth', () => new AuthService());\n",
+            encoding="utf-8",
+        )
+        (self.root / "tests" / "billing.test.ts").write_text(
+            'import { BillingService } from "../src/billing";\n'
+            "test('billing', () => new BillingService());\n",
+            encoding="utf-8",
+        )
+        (self.root / "tests" / "test_auth_secret.test.ts").write_text(
+            'api_key = "Zq81hTr0Pw93LkdUv72Mx"\n', encoding="utf-8"
+        )
+        self.commit("add source and related/unrelated tests")
+        with self.assertLogs("agentramen", level="WARNING"):
+            index_repository(self.root)
+
+        impact = dependency_impact(self.root, "src/auth_service.ts")
+        self.assertEqual(impact["tests"], ["tests/auth_service.test.ts"])
+        self.assertEqual(
+            impact["test_associations"],
+            [
+                {
+                    "path": "tests/auth_service.test.ts",
+                    "confidence": "confirmed",
+                    "depth": 1,
+                    "evidence": ["tests/auth_service.test.ts", "src/auth_service.ts"],
+                }
+            ],
+        )
+        self.assertNotIn("tests/billing.test.ts", impact["tests"])
+        self.assertEqual(
+            impact["unindexed_test_candidates"],
+            [
+                {
+                    "path": "tests/test_auth_secret.test.ts",
+                    "reason": "credential-like content detected",
+                    "confidence": "not_assessed",
+                }
+            ],
+        )
 
     def test_indexed_context_ranking_matches_full_scan_reference(self):
         from collections import Counter

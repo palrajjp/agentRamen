@@ -27,6 +27,8 @@ gitgraph impact src/auth.py
 
 Try it in 30 seconds with [`examples/demo.sh`](examples/demo.sh). See the [roadmap](ROADMAP.md) and [contributing guide](CONTRIBUTING.md).
 
+A minimal [VS Code extension](vscode-extension/README.md) is also available.
+
 ## What it can do
 
 - **Find task context:** rank files using paths, symbols, imports, Git history, and optional local semantic similarity.

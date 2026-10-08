@@ -5,7 +5,7 @@ import json
 import sys
 from pathlib import Path
 
-from .benchmark import run_benchmark
+from .benchmark import run_comparisons
 from .core import (
     GitGraphError,
     architecture,
@@ -18,6 +18,7 @@ from .core import (
     file_history,
     find_root,
     git,
+    graph_at,
     graph_export,
     hotspots,
     index_repository,
@@ -292,6 +293,7 @@ def main(argv: list[str] | None = None) -> int:
     hot.add_argument("--limit", type=int, default=20)
     hot.add_argument("--json", action="store_true")
     export = subparsers.add_parser("export", help="Export the current graph")
+    export.add_argument("--at", dest="revision")
     export.add_argument("--json", action="store_true")
     diff = subparsers.add_parser("diff", help="Compare files changed between two commits")
     diff.add_argument("commit1")
@@ -305,6 +307,10 @@ def main(argv: list[str] | None = None) -> int:
     pr.add_argument("--json", action="store_true")
     benchmark = subparsers.add_parser("benchmark", help="Measure indexing and retrieval locally")
     benchmark.add_argument("--files", nargs="+", type=int, default=[10, 1000])
+    benchmark.add_argument("--repository", type=Path)
+    benchmark.add_argument(
+        "--semantic-mode", choices=("off", "on", "both"), default="off"
+    )
     benchmark.add_argument("--json", action="store_true")
     serve = subparsers.add_parser("serve", help="Start the local versioned HTTP API")
     serve.add_argument("--host", default="127.0.0.1")
@@ -333,7 +339,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "hotspots":
             value = hotspots(root, args.limit)
         elif args.command == "export":
-            value = graph_export(root)
+            value = graph_at(root, args.revision) if args.revision else graph_export(root)
         elif args.command == "diff":
             value = _diff(root, args.commit1, args.commit2)
         elif args.command == "changes":
@@ -341,7 +347,10 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "pr":
             value = pull_request_summary(root, args.base)
         elif args.command == "benchmark":
-            value = [run_benchmark(count) for count in args.files]
+            modes = (False, True) if args.semantic_mode == "both" else (
+                args.semantic_mode == "on",
+            )
+            value = run_comparisons(args.files, args.repository, modes)
         elif args.command == "serve":
             from .server import serve as serve_api
 

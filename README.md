@@ -268,11 +268,17 @@ Run `agentramen benchmark --files 10 1000` to measure synthetic initial indexing
 
 The index stays in `.agentramen/graph.db` on the local machine or in the configured CI artifact. With semantic retrieval disabled, the database stores source metadata and hashes; when enabled, it additionally stores locally generated embeddings. agentRamen skips common generated directories, environment files, private-key files, oversized files, binary files, and files containing recognizable private-key or credential assignment patterns. Add more path patterns to `.agentramenignore` (one pattern per line). Review your ignore rules before publishing generated artifacts.
 
-## Current limitations
+## Retrieval and memory
 
-Tree-sitter parsing, semantic embeddings, the local web UI, and cached commit-addressable graph snapshots are implemented. Tree-sitter and semantic retrieval are optional extras; parsing falls back to regex where needed. Import resolution supports common file/module layouts, not every workspace alias or language-specific build system. Historical indexing retains at most 100 commits by default; PR architecture assessment is based on indexed dependency edges rather than semantic boundary rules. Context token estimates are not measured with a model tokenizer, and benchmark outputs must be measured locally rather than treated as performance guarantees.
+Context retrieval uses an incremental SQLite inverted index for lexical candidates, then fuses lexical, optional semantic, and graph/history rankings with reciprocal-rank fusion before applying the token budget. Reviewed memory can be staged, approved, or rejected; approving a new fact supersedes conflicting active facts with the same subject.
 
-Lexical context retrieval uses an incremental SQLite inverted index over paths, symbols, and imports, along with indexed document frequencies. History and graph relationships are queried only for lexical/semantic candidates and their relevant neighbors, rather than scanning all indexed rows and edges. Ranking is covered by parity tests against the former full-scan behavior. When semantic retrieval is enabled, exact similarity still evaluates stored embeddings; consider an optional approximate-nearest-neighbor index only if repository benchmarks show this is a bottleneck.
+## Known limitations
+
+- Import resolution handles common file and module layouts, but not every workspace alias or language-specific build system.
+- Architecture and pull-request summaries use indexed dependency edges; they do not apply semantic boundary rules.
+- Semantic retrieval calculates exact similarity rather than using an approximate-nearest-neighbor index.
+- Token counts are approximate character-based estimates unless `context.tokenizer_model` is configured with the optional tokenizer extra.
+- History keeps 100 commits by default, configurable from 1 to 100,000.
 
 ## Development
 

@@ -125,8 +125,18 @@ loadStatus();loadHotspots();
 
 
 def create_server(root: Path, host: str = "127.0.0.1", port: int = 8765):
+    allowed_hosts = {"localhost", "127.0.0.1", "::1", host.strip("[]").lower()}
+
     class Handler(BaseHTTPRequestHandler):
         server_version = f"agentRamen/{__version__}"
+
+        def _trusted(self) -> bool:
+            # Blocks DNS rebinding (Host) and cross-site requests (Origin).
+            host_header = self.headers.get("Host", "")
+            if (urlparse(f"//{host_header}").hostname or "").lower() not in allowed_hosts:
+                return False
+            origin = self.headers.get("Origin")
+            return origin is None or urlparse(origin).netloc.lower() == host_header.lower()
 
         def _respond(self, status: int, value: object) -> None:
             payload = json.dumps(value, ensure_ascii=False).encode("utf-8")
@@ -134,6 +144,7 @@ def create_server(root: Path, host: str = "127.0.0.1", port: int = 8765):
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(payload)))
             self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
             self.end_headers()
             self.wfile.write(payload)
 
@@ -142,6 +153,9 @@ def create_server(root: Path, host: str = "127.0.0.1", port: int = 8765):
             return parsed.path, parse_qs(parsed.query)
 
         def do_GET(self) -> None:
+            if not self._trusted():
+                self._respond(403, {"error": "Forbidden host or origin"})
+                return
             path, query = self._query()
             try:
                 if path in ("/", "/ui"):
@@ -198,6 +212,12 @@ def create_server(root: Path, host: str = "127.0.0.1", port: int = 8765):
                 self._respond(400, {"error": str(exc)})
 
         def do_POST(self) -> None:
+            if not self._trusted():
+                self._respond(403, {"error": "Forbidden host or origin"})
+                return
+            if self.headers.get_content_type() != "application/json":
+                self._respond(415, {"error": "Content-Type must be application/json"})
+                return
             path, _ = self._query()
             try:
                 content_length = int(self.headers.get("Content-Length", "0"))

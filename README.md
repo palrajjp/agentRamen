@@ -1,5 +1,7 @@
 # agentRamen
 
+<!-- mcp-name: io.github.palrajjp/agentramen -->
+
 <p align="center"><img src="https://raw.githubusercontent.com/palrajjp/agentRamen/main/agentramen/assets/agentramen-logo.png" alt="agentRamen logo" width="520"></p>
 
 [![CI](https://github.com/palrajjp/agentRamen/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/palrajjp/agentRamen/actions/workflows/tests.yml)

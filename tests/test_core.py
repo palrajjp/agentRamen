@@ -83,6 +83,55 @@ class GitGraphIndexTests(unittest.TestCase):
         self.assertEqual(updated["removed"], 1)
         self.assertEqual(repository_status(self.root)["files"], 1)
 
+    def test_search_terms_and_document_frequencies_update_incrementally(self):
+        (self.root / "auth_service.py").write_text(
+            "class AuthService:\n    pass\n", encoding="utf-8"
+        )
+        (self.root / "billing_service.py").write_text(
+            "class BillingService:\n    pass\n", encoding="utf-8"
+        )
+        self.commit("add services")
+        index_repository(self.root)
+        conn = connect(self.root)
+        self.assertEqual(
+            conn.execute(
+                "SELECT document_frequency FROM term_document_frequency WHERE term='service'"
+            ).fetchone()[0],
+            2,
+        )
+        initial_terms = conn.execute(
+            "SELECT COUNT(*) FROM file_search_terms"
+        ).fetchone()[0]
+        conn.close()
+
+        (self.root / "billing_service.py").unlink()
+        (self.root / "auth_service.py").write_text(
+            "class AuthService:\n    def login(self): pass\n", encoding="utf-8"
+        )
+        self.commit("remove billing and update auth")
+        index_repository(self.root)
+
+        conn = connect(self.root)
+        self.assertEqual(
+            conn.execute(
+                "SELECT document_frequency FROM term_document_frequency WHERE term='service'"
+            ).fetchone()[0],
+            1,
+        )
+        self.assertEqual(
+            conn.execute(
+                "SELECT COUNT(*) FROM file_search_terms WHERE path='billing_service.py'"
+            ).fetchone()[0],
+            0,
+        )
+        self.assertGreater(
+            conn.execute(
+                "SELECT COUNT(*) FROM file_search_terms WHERE path='auth_service.py'"
+            ).fetchone()[0],
+            initial_terms // 2,
+        )
+        conn.close()
+
     def test_reindex_after_history_rewind(self):
         (self.root / "old.py").write_text("class Old:\n    pass\n", encoding="utf-8")
         self.commit("add old")
@@ -331,6 +380,92 @@ class GitGraphIndexTests(unittest.TestCase):
         self.assertEqual(impact["indirect_dependents"], ["dashboard.py"])
         context = context_for(self.root, "AuthService views")
         self.assertTrue(context["files"])
+
+    def test_indexed_context_ranking_matches_full_scan_reference(self):
+        from collections import Counter
+
+        from gitgraph.core import _terms
+
+        (self.root / "auth_service.py").write_text(
+            "class AuthService:\n    def login(self): pass\n", encoding="utf-8"
+        )
+        (self.root / "views.py").write_text(
+            "from auth_service import AuthService\n"
+            "class LoginView:\n    def render(self): return AuthService()\n",
+            encoding="utf-8",
+        )
+        (self.root / "billing.py").write_text(
+            "class BillingService:\n    def invoice(self): pass\n", encoding="utf-8"
+        )
+        self.commit("add auth views and billing")
+        index_repository(self.root)
+        (self.root / "auth_service.py").write_text(
+            "class AuthService:\n    def login(self): return True\n", encoding="utf-8"
+        )
+        self.commit("update authentication")
+        index_repository(self.root)
+
+        conn = connect(self.root)
+        rows = conn.execute(
+            "SELECT path, language, bytes, symbols, imports, digest FROM files"
+        ).fetchall()
+        history_rows = conn.execute(
+            "SELECT cf.path, c.subject, c.hash FROM commit_files cf "
+            "JOIN commits c ON c.hash=cf.commit_hash ORDER BY c.committed_at DESC"
+        ).fetchall()
+        edge_rows = conn.execute(
+            "SELECT source, target, type, weight FROM graph_edges "
+            "WHERE type IN ('DEPENDS_ON', 'CO_CHANGED_WITH')"
+        ).fetchall()
+        conn.close()
+
+        task_terms = _terms("auth login")
+        frequencies = Counter(
+            term for path, *_ in rows for term in _terms(path.replace("/", " "))
+        )
+        history = {}
+        for path, subject, commit_hash in history_rows:
+            history.setdefault(path, []).append((subject, commit_hash))
+        relations = {}
+        for source, target, kind, weight in edge_rows:
+            relations.setdefault(source.removeprefix("file:"), []).append(
+                (target.removeprefix("file:"), kind, weight)
+            )
+        lexical = set()
+        ranked = []
+        metadata = {}
+        for path, language, size, raw_symbols, raw_imports, _digest in rows:
+            symbols = json.loads(raw_symbols)
+            imports = json.loads(raw_imports)
+            metadata[path] = (language, size, symbols, imports)
+            overlap = (
+                _terms(path.replace("/", " "))
+                | _terms(" ".join(symbols + imports))
+            ) & task_terms
+            if overlap:
+                lexical.add(path)
+                score = sum(1 / max(1, frequencies[word]) for word in overlap)
+                score += min(len(history.get(path, [])), 5) * 0.08
+                ranked.append((score, path, language, size, symbols, imports))
+        ranked_paths = {item[1] for item in ranked}
+        for source, related in relations.items():
+            if source in ranked_paths or source not in metadata:
+                continue
+            matches = [item for item in related if item[0] in lexical]
+            if matches:
+                language, size, symbols, imports = metadata[source]
+                score = max(
+                    0.18 + min(weight, 3) * 0.04 + (0.12 if kind == "DEPENDS_ON" else 0)
+                    for _target, kind, weight in matches
+                )
+                ranked.append((score, source, language, size, symbols, imports))
+        ranked.sort(key=lambda item: (-item[0], item[1]))
+
+        actual = context_for(self.root, "auth login", 10_000)["files"]
+        self.assertEqual(
+            [(item["path"], item["score"]) for item in actual],
+            [(path, round(score, 3)) for score, path, *_ in ranked],
+        )
 
     def test_tree_sitter_analyzer_falls_back_when_optional_package_is_missing(self):
         from gitgraph.analyzers import TreeSitterAnalyzer

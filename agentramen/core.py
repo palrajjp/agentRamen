@@ -355,6 +355,8 @@ def connect(root: Path) -> sqlite3.Connection:
             ON graph_edges(source, type, target);
         CREATE INDEX IF NOT EXISTS graph_edges_by_target_type
             ON graph_edges(target, type, source);
+        CREATE INDEX IF NOT EXISTS graph_nodes_by_type_name
+            ON graph_nodes(type, name);
         """
     )
     from .models.schema_patches import apply_schema_patches
@@ -478,15 +480,20 @@ def _commit_history(
             f"{last_commit}..{head}",
             "--format=%H%x09%an%x09%s%x09%cI",
         ).splitlines()
+    commits_args = []
+    renames_args = []
+    rename_edges_args = []
+    commit_files_args = []
+    commit_nodes_args = []
+    file_nodes_args = []
+    changed_in_args = []
+
     for row in revisions:
         parts = row.split("\t", 3)
         if len(parts) != 4:
             continue
         commit_hash, author, subject, committed_at = parts
-        conn.execute(
-            "INSERT OR IGNORE INTO commits(hash, author, subject, committed_at) VALUES (?, ?, ?, ?)",
-            (commit_hash, author, subject, committed_at),
-        )
+        commits_args.append((commit_hash, author, subject, committed_at))
         changes = git(
             root,
             "diff-tree",
@@ -508,47 +515,61 @@ def _commit_history(
                 old_path, new_path = fields[index], fields[index + 1]
                 paths.extend((old_path, new_path))
                 if status.startswith("R"):
-                    conn.execute(
-                        "INSERT OR IGNORE INTO renames(commit_hash, old_path, new_path) "
-                        "VALUES (?, ?, ?)",
-                        (commit_hash, old_path, new_path),
-                    )
-                    conn.execute(
-                        "INSERT OR REPLACE INTO graph_edges(source, target, type) "
-                        "VALUES (?, ?, 'RENAMED_IN')",
-                        (f"file:{old_path}", f"file:{new_path}"),
-                    )
+                    renames_args.append((commit_hash, old_path, new_path))
+                    rename_edges_args.append((f"file:{old_path}", f"file:{new_path}"))
                 index += 2
             elif index < len(fields):
                 paths.append(fields[index])
                 index += 1
         for path in paths:
             if path:
-                conn.execute(
-                    "INSERT OR IGNORE INTO commit_files(commit_hash, path) VALUES (?, ?)",
-                    (commit_hash, path),
-                )
-        conn.execute(
-            "INSERT OR REPLACE INTO graph_nodes(id, type, name, metadata) "
-            "VALUES (?, 'Commit', ?, ?)",
-            (
-                f"commit:{commit_hash}",
-                parts[2],
-                json.dumps({"author": author, "committed_at": committed_at}),
-            ),
-        )
+                commit_files_args.append((commit_hash, path))
+        
+        commit_nodes_args.append((
+            f"commit:{commit_hash}",
+            subject,
+            json.dumps({"author": author, "committed_at": committed_at}),
+        ))
         for path in paths:
             if path:
-                conn.execute(
-                    "INSERT OR IGNORE INTO graph_nodes(id, type, name, path, metadata) "
-                    "VALUES (?, 'File', ?, ?, '{\"historical\": true}')",
-                    (f"file:{path}", path, path),
-                )
-                conn.execute(
-                    "INSERT OR IGNORE INTO graph_edges(source, target, type) "
-                    "VALUES (?, ?, 'CHANGED_IN')",
-                    (f"file:{path}", f"commit:{commit_hash}"),
-                )
+                file_nodes_args.append((f"file:{path}", path, path))
+                changed_in_args.append((f"file:{path}", f"commit:{commit_hash}"))
+
+    if commits_args:
+        conn.executemany(
+            "INSERT OR IGNORE INTO commits(hash, author, subject, committed_at) VALUES (?, ?, ?, ?)",
+            commits_args,
+        )
+    if renames_args:
+        conn.executemany(
+            "INSERT OR IGNORE INTO renames(commit_hash, old_path, new_path) VALUES (?, ?, ?)",
+            renames_args,
+        )
+    if rename_edges_args:
+        conn.executemany(
+            "INSERT OR REPLACE INTO graph_edges(source, target, type) VALUES (?, ?, 'RENAMED_IN')",
+            rename_edges_args,
+        )
+    if commit_files_args:
+        conn.executemany(
+            "INSERT OR IGNORE INTO commit_files(commit_hash, path) VALUES (?, ?)",
+            commit_files_args,
+        )
+    if commit_nodes_args:
+        conn.executemany(
+            "INSERT OR REPLACE INTO graph_nodes(id, type, name, metadata) VALUES (?, 'Commit', ?, ?)",
+            commit_nodes_args,
+        )
+    if file_nodes_args:
+        conn.executemany(
+            "INSERT OR IGNORE INTO graph_nodes(id, type, name, path, metadata) VALUES (?, 'File', ?, ?, '{\"historical\": true}')",
+            file_nodes_args,
+        )
+    if changed_in_args:
+        conn.executemany(
+            "INSERT OR IGNORE INTO graph_edges(source, target, type) VALUES (?, ?, 'CHANGED_IN')",
+            changed_in_args,
+        )
     conn.execute(
         "INSERT INTO metadata(key, value) VALUES('last_commit', ?) "
         "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -570,13 +591,14 @@ def _commit_history(
     conn.execute("DELETE FROM graph_nodes WHERE type='Commit' AND id NOT IN "
                  "(SELECT 'commit:' || hash FROM commits)")
     conn.execute("DELETE FROM graph_edges WHERE type='RENAMED_IN'")
-    for old_path, new_path in conn.execute(
+    renames = conn.execute(
         "SELECT DISTINCT old_path, new_path FROM renames"
-    ).fetchall():
-        conn.execute(
+    ).fetchall()
+    if renames:
+        conn.executemany(
             "INSERT OR REPLACE INTO graph_edges(source, target, type) "
             "VALUES (?, ?, 'RENAMED_IN')",
-            (f"file:{old_path}", f"file:{new_path}"),
+            [(f"file:{old_path}", f"file:{new_path}") for old_path, new_path in renames],
         )
     conn.execute(
         "DELETE FROM graph_nodes WHERE type='File' AND id NOT IN "
@@ -659,6 +681,7 @@ def _sync_graph(conn: sqlite3.Connection, changed_paths: set[str]) -> None:
     references = conn.execute(
         "SELECT path, name FROM graph_nodes WHERE type='SymbolReference' ORDER BY path, name"
     ).fetchall()
+    call_edges = []
     for path, call in references:
         targets = conn.execute(
             "SELECT id FROM graph_nodes WHERE type='Symbol' AND "
@@ -667,11 +690,12 @@ def _sync_graph(conn: sqlite3.Connection, changed_paths: set[str]) -> None:
         ).fetchall()
         for (target_id,) in targets:
             if target_id != f"symbol:{path}::{call}":
-                conn.execute(
-                    "INSERT OR IGNORE INTO graph_edges(source, target, type) "
-                    "VALUES (?, ?, 'CALLS')",
-                    (f"file:{path}", target_id),
-                )
+                call_edges.append((f"file:{path}", target_id))
+    if call_edges:
+        conn.executemany(
+            "INSERT OR IGNORE INTO graph_edges(source, target, type) VALUES (?, ?, 'CALLS')",
+            call_edges,
+        )
     candidates_by_source: list[tuple[str, set[str]]] = []
     candidate_paths: set[str] = set()
     for source_path in existing_changed:

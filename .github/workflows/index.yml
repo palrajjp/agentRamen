@@ -85,7 +85,7 @@ jobs:
         run: agentramen snapshot verify --repository-id "$AGENTRAMEN_REPOSITORY_ID" --archive "$RUNNER_TEMP/agentramen-snapshot.zip" --json | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Upload centralized MCP snapshot
         if: inputs.central_snapshot
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: agentramen-snapshot-${{ github.sha }}
           path: ${{ runner.temp }}/agentramen-snapshot.zip
@@ -99,7 +99,7 @@ jobs:
         run: agentramen context "$AGENTRAMEN_TASK" --budget "$AGENTRAMEN_TOKEN_BUDGET" --json > agentramen-context.json
       - name: Upload task context
         if: inputs.task != ''
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: agentramen-context-${{ github.sha }}
           path: agentramen-context.json
@@ -108,7 +108,7 @@ jobs:
       - name: Summarize pull request context
         if: github.event_name == 'pull_request'
         run: agentramen pr --base "${{ github.event.pull_request.base.sha }}" --json | tee -a "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: agentramen-${{ github.sha }}
           path: .agentramen/graph.db

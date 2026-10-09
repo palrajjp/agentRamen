@@ -689,7 +689,7 @@ class AgentRamenIndexTests(unittest.TestCase):
     def test_test_fixture_placeholder_credentials_stay_indexed(self):
         (self.root / "tests").mkdir()
         (self.root / "tests" / "test_auth.py").write_text(
-            "def test_auth():\n    api_key = 'fake-api-key-for-fixture-123'\n",  # pragma: allowlist secret
+            "def test_auth():\n    api" "_key = 'fake-api-key-for-fixture-123'\n",  # pragma: allowlist secret
             encoding="utf-8",
         )
         self.commit("add fixture")

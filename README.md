@@ -60,6 +60,14 @@ flowchart LR
 
 The default install uses the Python standard library and conservative analysis for other languages. Optional extras add Tree-sitter parsing, local semantic retrieval, and model-aware token counting.
 
+| Project               | Stars  | Approach                                                      | vs. agentRamen                                                                                             |
+| --------------------- | ------ | ------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| Serenagithub          | ~30.1k | LSP-based semantic retrieval + editing toolkit, MCP           | Much broader, much more widely adopted agent toolkit                                                       |
+| Aider's RepoMapgithub | ~49.4k | Tree-sitter + PageRank token-budgeted repo map                | Established example of graph-ranked, token-budgeted repo context (adjacent: a feature inside a coding app) |
+| Repomixgithub         | ~28.7k | Packs whole repo into one AI-friendly file                    | Adjacent workflow: whole-repo packing vs. selective context                                                |
+| code-index-mcpgithub  | ~1k    | Tree-sitter AST for 10 languages, persistent index, MCP stdio | The most structurally comparable standalone index server; no semantic search or CI integration stated      |
+| agentRamen            | 1      | SQLite graph, Git-history ranking, MCP+CLI+HTTP+VS Code       | Day-one, working alpha                                                                                     |
+
 ## Optional extras
 
 ```bash

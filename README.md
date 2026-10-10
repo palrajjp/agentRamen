@@ -60,7 +60,7 @@ flowchart LR
 
 The default install uses the Python standard library and conservative analysis for other languages. Optional extras add Tree-sitter parsing, local semantic retrieval, and model-aware token counting.
 
-## How it compares
+**How it compares**
 
 
 | Project               | Stars  | Approach                                                      | vs. agentRamen                                                                                             |

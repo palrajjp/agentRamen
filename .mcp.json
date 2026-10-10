@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "agentramen": {
+      "type": "stdio",
+      "command": "agentramen",
+      "args": ["mcp"]
+    }
+  }
+}

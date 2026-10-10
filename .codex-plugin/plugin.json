@@ -1,0 +1,13 @@
+{
+  "name": "agentramen",
+  "version": "0.2.6",
+  "description": "Local-first repository intelligence for coding agents.",
+  "author": {
+    "name": "agentRamen contributors"
+  },
+  "homepage": "https://github.com/palrajjp/agentRamen",
+  "repository": "https://github.com/palrajjp/agentRamen",
+  "license": "Apache-2.0",
+  "keywords": ["code-intelligence", "repository-context", "MCP"],
+  "mcpServers": "./.mcp.json"
+}

@@ -11,6 +11,7 @@ from jwt import PyJWKClient
 from mcp.server import MCPServer
 from mcp.server.auth.provider import AccessToken, TokenVerifier
 from mcp.server.auth.settings import AuthSettings
+from mcp.types import ToolAnnotations
 from mcp.server.transport_security import TransportSecuritySettings
 from pydantic import AnyHttpUrl
 
@@ -28,6 +29,13 @@ from .core import (
     repository_status,
 )
 from .memory import search_shared_memories
+
+READ_ONLY = ToolAnnotations(
+    readOnlyHint=True,
+    destructiveHint=False,
+    idempotentHint=True,
+    openWorldHint=False,
+)
 
 
 class OIDCVerifier(TokenVerifier):
@@ -163,45 +171,45 @@ def create_remote_server(
             "snapshot_commit": snapshot_commit,
         }
 
-    @server.tool(description="Show the pinned repository snapshot revision and index counts.")
+    @server.tool(annotations=READ_ONLY, description="Show the pinned repository snapshot revision and index counts.")
     def repo_status() -> dict[str, object]:
         return with_provenance(
             {"revision": snapshot_commit, **repository_status(snapshot_root)}
         )
 
-    @server.tool(description="Retrieve bounded repository context for a coding task.")
+    @server.tool(annotations=READ_ONLY, description="Retrieve bounded repository context for a coding task.")
     def repo_context(task: str, token_budget: int = 2000) -> dict[str, Any]:
         return with_provenance(context_for(snapshot_root, task, token_budget))
 
-    @server.tool(description="Search indexed file paths and symbols in the pinned snapshot.")
+    @server.tool(annotations=READ_ONLY, description="Search indexed file paths and symbols in the pinned snapshot.")
     def repo_search(query: str, limit: int = 20) -> dict[str, Any]:
         return with_provenance({"results": _repo_search(snapshot_root, query, limit)})
 
-    @server.tool(description="Summarize repository languages, modules, and graph relationships.")
+    @server.tool(annotations=READ_ONLY, description="Summarize repository languages, modules, and graph relationships.")
     def repo_architecture() -> dict[str, object]:
         return with_provenance(architecture(snapshot_root))
 
-    @server.tool(description="Explain a file's symbols, dependencies, and dependents.")
+    @server.tool(annotations=READ_ONLY, description="Explain a file's symbols, dependencies, and dependents.")
     def repo_explain(path: str) -> dict[str, object]:
         return with_provenance(explain_file(snapshot_root, path))
 
-    @server.tool(description="Show direct/indirect impact for a target file.")
+    @server.tool(annotations=READ_ONLY, description="Show direct/indirect impact for a target file.")
     def repo_impact(path: str) -> dict[str, object]:
         return with_provenance(dependency_impact(snapshot_root, path))
 
-    @server.tool(description="List direct dependencies for a target file.")
+    @server.tool(annotations=READ_ONLY, description="List direct dependencies for a target file.")
     def repo_dependencies(path: str) -> dict[str, Any]:
         return with_provenance({"dependencies": find_dependencies(snapshot_root, path)})
 
-    @server.tool(description="List files with the most indexed Git changes.")
+    @server.tool(annotations=READ_ONLY, description="List files with the most indexed Git changes.")
     def repo_hotspots(limit: int = 20) -> dict[str, Any]:
         return with_provenance({"hotspots": hotspots(snapshot_root, limit)})
 
-    @server.tool(description="Search approved team memories in this pinned snapshot.")
+    @server.tool(annotations=READ_ONLY, description="Search approved team memories in this pinned snapshot.")
     def repo_team_memory_search(query: str, limit: int = 10) -> dict[str, Any]:
         return with_provenance({"memories": search_shared_memories(snapshot_root, query, limit)})
 
-    @server.tool(description="Export graph nodes and relationships for this snapshot.")
+    @server.tool(annotations=READ_ONLY, description="Export graph nodes and relationships for this snapshot.")
     def repo_graph() -> dict[str, object]:
         return with_provenance(graph_export(snapshot_root))
 

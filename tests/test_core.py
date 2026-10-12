@@ -452,6 +452,19 @@ class AgentRamenIndexTests(unittest.TestCase):
         self.assertIn("repo_context", names)
         self.assertIn("repo_team_memory_search", names)
         self.assertNotIn("repo_publish_memory", names)
+        self.assertEqual(
+            names,
+            {
+                "repo_status", "repo_context", "repo_search", "repo_architecture",
+                "repo_explain", "repo_impact", "repo_dependencies", "repo_hotspots",
+                "repo_team_memory_search", "repo_graph",
+            },
+        )
+        for tool in tools:
+            self.assertTrue(tool.annotations.readOnlyHint)
+            self.assertFalse(tool.annotations.destructiveHint)
+            self.assertTrue(tool.annotations.idempotentHint)
+            self.assertFalse(tool.annotations.openWorldHint)
         context_result = asyncio.run(
             server.call_tool("repo_context", {"task": "AuthService", "token_budget": 500})
         )
@@ -1109,6 +1122,29 @@ class AgentRamenIndexTests(unittest.TestCase):
         self.assertIn("repo_publish_memory", tools)
         self.assertIn("repo_team_memory_search", tools)
         self.assertIn("repo_memory_audit", tools)
+        self.assertEqual(
+            set(tools),
+            {
+                "repo_context", "repo_status", "repo_history", "repo_search",
+                "repo_explain", "repo_impact", "repo_architecture", "repo_hotspots",
+                "repo_graph", "repo_dependencies", "repo_tests", "repo_changes",
+                "repo_review_queue", "repo_stage_memory", "repo_approve_memory",
+                "repo_publish_memory", "repo_team_memory_search", "repo_memory_audit",
+                "repo_reject_memory",
+            },
+        )
+        for tool in results_by_id[2]["result"]["tools"]:
+            hints = tool["annotations"]
+            self.assertEqual(
+                set(hints),
+                {"readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"},
+            )
+            self.assertTrue(all(isinstance(value, bool) for value in hints.values()))
+            writes = tool["name"] in {
+                "repo_stage_memory", "repo_approve_memory",
+                "repo_publish_memory", "repo_reject_memory",
+            }
+            self.assertEqual(hints["readOnlyHint"], not writes)
         context = results_by_id[3]["result"]["structuredContent"]
         self.assertEqual(context["token_budget"], 350)
         self.assertTrue(context["evidence"])

@@ -107,6 +107,25 @@ def _diff(root: Path, commit1: str, commit2: str) -> list[dict[str, str]]:
     return changes
 
 
+_MCP_WRITE_TOOLS = {
+    # name: (destructiveHint, idempotentHint)
+    "repo_stage_memory": (False, False),
+    "repo_approve_memory": (False, True),
+    "repo_publish_memory": (False, True),
+    "repo_reject_memory": (True, True),
+}
+
+
+def _tool_annotations(name: str) -> dict[str, bool]:
+    destructive, idempotent = _MCP_WRITE_TOOLS.get(name, (False, True))
+    return {
+        "readOnlyHint": name not in _MCP_WRITE_TOOLS,
+        "destructiveHint": destructive,
+        "idempotentHint": idempotent,
+        "openWorldHint": False,
+    }
+
+
 def _mcp(root: Path) -> None:
     tools = [
         {
@@ -284,6 +303,8 @@ def _mcp(root: Path) -> None:
             },
         },
     ]
+    for tool in tools:
+        tool["annotations"] = _tool_annotations(tool["name"])
     last_context_evidence: list[dict[str, str]] = []
     for line in sys.stdin:
         message = {}
